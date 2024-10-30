@@ -173,12 +173,15 @@ public:
     Vector<CSS::Transformation> transformations() const;
     Optional<CSS::TransformBox> transform_box() const;
     CSS::TransformOrigin transform_origin() const;
+    Optional<CSS::Transformation> rotate(Layout::Node const&) const;
 
     Optional<CSS::MaskType> mask_type() const;
     Color stop_color() const;
     float stop_opacity() const;
     float fill_opacity() const;
     Optional<CSS::StrokeLinecap> stroke_linecap() const;
+    Optional<CSS::StrokeLinejoin> stroke_linejoin() const;
+    NumberOrCalculated stroke_miterlimit() const;
     float stroke_opacity() const;
     Optional<CSS::FillRule> fill_rule() const;
     Optional<CSS::ClipRule> clip_rule() const;

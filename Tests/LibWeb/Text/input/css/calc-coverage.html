@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Many of these are currently wrong. See https://github.com/LadybirdBrowser/ladybird/issues/1812 -->
 <style>
     :root {
         --n: 2;
@@ -20,6 +21,12 @@
         "animation-iteration-count": [
             "calc(2)",
             "calc(2 * var(--n))",
+        ],
+        "backdrop-filter": [
+            "grayscale(calc(2%))",
+            "grayscale(calc(2% * var(--n)))",
+            "grayscale(calc(0.02))",
+            "grayscale(calc(0.02 * var(--n)))",
         ],
         "background-position-x": [
             "calc(2px)",
@@ -73,6 +80,12 @@
             "calc(2px)",
             "calc(2px * var(--n))",
         ],
+        "clip-path": [
+            "polygon(calc(0px) calc(2px), calc(2px) calc(0px), calc(2px) calc(2px))",
+            "polygon(calc(0px * var(--n)) calc(2px * var(--n)), calc(2px * var(--n)) calc(0px * var(--n)), calc(2px * var(--n)) calc(2px * var(--n)))",
+            "polygon(calc(0%) calc(2%), calc(2%) calc(0%), calc(2%) calc(2%))",
+            "polygon(calc(0% * var(--n)) calc(2% * var(--n)), calc(2% * var(--n)) calc(0% * var(--n)), calc(2% * var(--n)) calc(2% * var(--n)))",
+        ],
         "column-count": [
             "calc(2)",
             "calc(2 * var(--n))",
@@ -108,6 +121,12 @@
         "fill-opacity": [
             "calc(2)",
             "calc(2 * var(--n))",
+        ],
+        "filter": [
+            "grayscale(calc(2%))",
+            "grayscale(calc(2% * var(--n)))",
+            "grayscale(calc(0.02))",
+            "grayscale(calc(0.02 * var(--n)))",
         ],
         "flex-basis": [
             "calc(2px)",

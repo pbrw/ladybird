@@ -146,7 +146,7 @@ WebIDL::ExceptionOr<void> FileReader::read_operation(Blob& blob, Type type, Opti
     bool is_first_chunk = true;
 
     // 10. In parallel, while true:
-    Platform::EventLoopPlugin::the().deferred_invoke([this, chunk_promise, reader, bytes, is_first_chunk, &realm, type, encoding_name, blobs_type]() mutable {
+    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(heap(), [this, chunk_promise, reader, bytes, is_first_chunk, &realm, type, encoding_name, blobs_type]() mutable {
         HTML::TemporaryExecutionContext execution_context { Bindings::host_defined_environment_settings_object(realm), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
         Optional<MonotonicTime> progress_timer;
 
@@ -157,9 +157,9 @@ WebIDL::ExceptionOr<void> FileReader::read_operation(Blob& blob, Type type, Opti
 
             // 1. Wait for chunkPromise to be fulfilled or rejected.
             // FIXME: Create spec issue to use WebIDL react to promise steps here instead of this custom logic
-            Platform::EventLoopPlugin::the().spin_until([&]() {
+            Platform::EventLoopPlugin::the().spin_until(JS::create_heap_function(heap(), [promise]() {
                 return promise->state() == JS::Promise::State::Fulfilled || promise->state() == JS::Promise::State::Rejected;
-            });
+            }));
 
             // 2. If chunkPromise is fulfilled, and isFirstChunk is true, queue a task to fire a progress event called loadstart at fr.
             // NOTE: ISSUE 2 We might change loadstart to be dispatched synchronously, to align with XMLHttpRequest behavior. [Issue #119]
@@ -257,7 +257,7 @@ WebIDL::ExceptionOr<void> FileReader::read_operation(Blob& blob, Type type, Opti
                 return;
             }
         }
-    });
+    }));
 
     return {};
 }

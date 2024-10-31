@@ -883,7 +883,7 @@ static WebIDL::ExceptionOr<Navigable::NavigationParamsVariant> create_navigation
         }
 
         // 7. Wait until either response is non-null, or navigable's ongoing navigation changes to no longer equal navigationId.
-        HTML::main_thread_event_loop().spin_until([&]() {
+        HTML::main_thread_event_loop().spin_until(JS::create_heap_function(vm.heap(), [&]() {
             if (response_holder->response() != nullptr)
                 return true;
 
@@ -891,7 +891,7 @@ static WebIDL::ExceptionOr<Navigable::NavigationParamsVariant> create_navigation
                 return true;
 
             return false;
-        });
+        }));
         // If the latter condition occurs, then abort fetchController, and return. Otherwise, proceed onward.
         if (navigation_id.has_value() && (!navigable->ongoing_navigation().has<String>() || navigable->ongoing_navigation().get<String>() != *navigation_id)) {
             fetch_controller->abort(realm, {});
@@ -1401,7 +1401,7 @@ WebIDL::ExceptionOr<void> Navigable::navigate(NavigateParams params)
     }
 
     // 20. In parallel, run these steps:
-    Platform::EventLoopPlugin::the().deferred_invoke([this, source_snapshot_params, target_snapshot_params, csp_navigation_type, document_resource, url, navigation_id, referrer_policy, initiator_origin_snapshot, response, history_handling, initiator_base_url_snapshot] {
+    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(heap(), [this, source_snapshot_params, target_snapshot_params, csp_navigation_type, document_resource, url, navigation_id, referrer_policy, initiator_origin_snapshot, response, history_handling, initiator_base_url_snapshot] {
         // AD-HOC: Not in the spec but subsequent steps will fail if the navigable doesn't have an active window.
         if (!active_window()) {
             set_delaying_load_events(false);
@@ -1489,7 +1489,7 @@ WebIDL::ExceptionOr<void> Navigable::navigate(NavigateParams params)
                 finalize_a_cross_document_navigation(*this, to_history_handling_behavior(history_handling), history_entry);
             }));
         })).release_value_but_fixme_should_propagate_errors();
-    });
+    }));
 
     return {};
 }
@@ -2189,12 +2189,8 @@ void Navigable::select_all()
     if (!selection)
         return;
 
-    if (auto position = document->cursor_position(); position && position->node()->is_editable()) {
-        auto& node = *position->node();
-        auto node_length = node.length();
-
-        (void)selection->set_base_and_extent(node, 0, node, node_length);
-        document->set_cursor_position(DOM::Position::create(document->realm(), node, node_length));
+    if (auto target = document->active_input_events_target()) {
+        target->select_all();
     } else if (auto* body = document->body()) {
         (void)selection->select_all_children(*body);
     }

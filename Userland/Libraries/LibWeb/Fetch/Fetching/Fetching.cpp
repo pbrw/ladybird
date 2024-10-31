@@ -332,15 +332,15 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
         request->current_url().set_scheme("https"_string);
     }
 
-    JS::SafeFunction<WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>>()> get_response = [&realm, &vm, &fetch_params, request]() -> WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> {
+    auto get_response = JS::create_heap_function(vm.heap(), [&realm, &vm, &fetch_params, request]() -> WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> {
         dbgln_if(WEB_FETCH_DEBUG, "Fetch: Running 'main fetch' get_response() function");
 
         // -> fetchParams’s preloaded response candidate is not null
         if (!fetch_params.preloaded_response_candidate().has<Empty>()) {
             // 1. Wait until fetchParams’s preloaded response candidate is not "pending".
-            HTML::main_thread_event_loop().spin_until([&] {
+            HTML::main_thread_event_loop().spin_until(JS::create_heap_function(vm.heap(), [&] {
                 return !fetch_params.preloaded_response_candidate().has<Infrastructure::FetchParams::PreloadedResponseCandidatePendingTag>();
-            });
+            }));
 
             // 2. Assert: fetchParams’s preloaded response candidate is a response.
             VERIFY(fetch_params.preloaded_response_candidate().has<JS::NonnullGCPtr<Infrastructure::Response>>());
@@ -426,13 +426,13 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
             // 2. Return the result of running HTTP fetch given fetchParams.
             return http_fetch(realm, fetch_params);
         }
-    };
+    });
 
     if (recursive == Recursive::Yes) {
         // 12. If response is null, then set response to the result of running the steps corresponding to the first
         //     matching statement:
         auto pending_response = !response
-            ? TRY(get_response())
+            ? TRY(get_response->function()())
             : PendingResponse::create(vm, request, *response);
 
         // 13. If recursive is true, then return response.
@@ -440,12 +440,12 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
     }
 
     // 11. If recursive is false, then run the remaining steps in parallel.
-    Platform::EventLoopPlugin::the().deferred_invoke([&realm, &vm, &fetch_params, request, response, get_response = move(get_response)] {
+    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(realm.heap(), [&realm, &vm, &fetch_params, request, response, get_response] {
         // 12. If response is null, then set response to the result of running the steps corresponding to the first
         //     matching statement:
         auto pending_response = PendingResponse::create(vm, request, Infrastructure::Response::create(vm));
         if (!response) {
-            auto pending_response_or_error = get_response();
+            auto pending_response_or_error = get_response->function()();
             if (pending_response_or_error.is_error())
                 return;
             pending_response = pending_response_or_error.release_value();
@@ -589,7 +589,7 @@ WebIDL::ExceptionOr<JS::GCPtr<PendingResponse>> main_fetch(JS::Realm& realm, Inf
                 fetch_response_handover(realm, fetch_params, *response);
             }
         });
-    });
+    }));
 
     return JS::GCPtr<PendingResponse> {};
 }
@@ -1920,9 +1920,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> http_network_or_cache_fet
                     revalidate_request->set_service_workers_mode(Infrastructure::Request::ServiceWorkersMode::None);
 
                     // 7. In parallel, run main fetch given a new fetch params whose request is revalidateRequest.
-                    Platform::EventLoopPlugin::the().deferred_invoke([&vm, &realm, revalidate_request, fetch_params = JS::NonnullGCPtr(fetch_params)] {
+                    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(realm.heap(), [&vm, &realm, revalidate_request, fetch_params = JS::NonnullGCPtr(fetch_params)] {
                         (void)main_fetch(realm, Infrastructure::FetchParams::create(vm, revalidate_request, fetch_params->timing_info()));
-                    });
+                    }));
                 }
                 // 2. Otherwise:
                 else {
@@ -2260,7 +2260,8 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
         // 13. Set up stream with byte reading support with pullAlgorithm set to pullAlgorithm, cancelAlgorithm set to cancelAlgorithm.
         Streams::set_up_readable_stream_controller_with_byte_reading_support(stream, pull_algorithm, cancel_algorithm);
 
-        auto on_headers_received = [&vm, request, pending_response, stream](auto const& response_headers, Optional<u32> status_code) {
+        auto on_headers_received = JS::create_heap_function(vm.heap(), [&vm, request, pending_response, stream](HTTP::HeaderMap const& response_headers, Optional<u32> status_code) {
+            (void)request;
             if (pending_response->is_resolved()) {
                 // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
                 // fetch algorithm is not interested in trailers, so just drop them here.
@@ -2290,11 +2291,11 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
             // 17. Return response.
             // NOTE: Typically response’s body’s stream is still being enqueued to after returning.
             pending_response->resolve(response);
-        };
+        });
 
         // 16. Run these steps in parallel:
         //    FIXME: 1. Run these steps, but abort when fetchParams is canceled:
-        auto on_data_received = [fetched_data_receiver](auto bytes) {
+        auto on_data_received = JS::create_heap_function(vm.heap(), [fetched_data_receiver](ReadonlyBytes bytes) {
             // 1. If one or more bytes have been transmitted from response’s message body, then:
             if (!bytes.is_empty()) {
                 // 1. Let bytes be the transmitted bytes.
@@ -2311,9 +2312,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
                 // FIXME: 8. If the size of buffer is larger than an upper limit chosen by the user agent, ask the user agent
                 //           to suspend the ongoing fetch.
             }
-        };
+        });
 
-        auto on_complete = [&vm, &realm, pending_response, stream](auto success, auto error_message) {
+        auto on_complete = JS::create_heap_function(vm.heap(), [&vm, &realm, pending_response, stream](bool success, Optional<StringView> error_message) {
             HTML::TemporaryExecutionContext execution_context { Bindings::host_defined_environment_settings_object(realm), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
 
             // 16.1.1.2. Otherwise, if the bytes transmission for response’s message body is done normally and stream is readable,
@@ -2332,11 +2333,12 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
                 if (!pending_response->is_resolved())
                     pending_response->resolve(Infrastructure::Response::network_error(vm, error));
             }
-        };
+        });
 
-        ResourceLoader::the().load_unbuffered(load_request, move(on_headers_received), move(on_data_received), move(on_complete));
+        ResourceLoader::the().load_unbuffered(load_request, on_headers_received, on_data_received, on_complete);
     } else {
-        auto on_load_success = [&realm, &vm, request, pending_response](auto data, auto& response_headers, auto status_code) {
+        auto on_load_success = JS::create_heap_function(vm.heap(), [&realm, &vm, request, pending_response](ReadonlyBytes data, HTTP::HeaderMap const& response_headers, Optional<u32> status_code) {
+            (void)request;
             dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' complete", request->url());
             if constexpr (WEB_FETCH_DEBUG)
                 log_response(status_code, response_headers, data);
@@ -2350,9 +2352,10 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
             }
             // FIXME: Set response status message
             pending_response->resolve(response);
-        };
+        });
 
-        auto on_load_error = [&realm, &vm, request, pending_response](auto& error, auto status_code, auto data, auto& response_headers) {
+        auto on_load_error = JS::create_heap_function(vm.heap(), [&realm, &vm, request, pending_response](ByteString const& error, Optional<u32> status_code, ReadonlyBytes data, HTTP::HeaderMap const& response_headers) {
+            (void)request;
             dbgln_if(WEB_FETCH_DEBUG, "Fetch: ResourceLoader load for '{}' failed: {} (status {})", request->url(), error, status_code.value_or(0));
             if constexpr (WEB_FETCH_DEBUG)
                 log_response(status_code, response_headers, data);
@@ -2372,9 +2375,9 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<PendingResponse>> nonstandard_resource_load
                 // FIXME: Set response status message
             }
             pending_response->resolve(response);
-        };
+        });
 
-        ResourceLoader::the().load(load_request, move(on_load_success), move(on_load_error));
+        ResourceLoader::the().load(load_request, on_load_success, on_load_error);
     }
 
     return pending_response;

@@ -5,14 +5,15 @@
  */
 
 #include "TimerSerenity.h"
-#include <AK/NonnullRefPtr.h>
 #include <LibCore/Timer.h>
+#include <LibJS/Heap/Heap.h>
+#include <LibJS/Heap/HeapFunction.h>
 
 namespace Web::Platform {
 
-NonnullRefPtr<TimerSerenity> TimerSerenity::create()
+JS::NonnullGCPtr<TimerSerenity> TimerSerenity::create(JS::Heap& heap)
 {
-    return adopt_ref(*new TimerSerenity);
+    return heap.allocate_without_realm<TimerSerenity>();
 }
 
 TimerSerenity::TimerSerenity()
@@ -20,7 +21,7 @@ TimerSerenity::TimerSerenity()
 {
     m_timer->on_timeout = [this] {
         if (on_timeout)
-            on_timeout();
+            on_timeout->function()();
     };
 }
 

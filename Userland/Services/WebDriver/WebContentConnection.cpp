@@ -32,6 +32,12 @@ void WebContentConnection::window_rect_updated(Web::WebDriver::Response const& r
         on_window_rect_updated(response);
 }
 
+void WebContentConnection::find_elements_complete(Web::WebDriver::Response const& response)
+{
+    if (on_find_elements_complete)
+        on_find_elements_complete(response);
+}
+
 void WebContentConnection::script_executed(Web::WebDriver::Response const& response)
 {
     if (on_script_executed)
@@ -48,6 +54,12 @@ void WebContentConnection::dialog_closed(Web::WebDriver::Response const& respons
 {
     if (on_dialog_closed)
         on_dialog_closed(response);
+}
+
+void WebContentConnection::screenshot_taken(Web::WebDriver::Response const& response)
+{
+    if (on_screenshot_taken)
+        on_screenshot_taken(response);
 }
 
 }

@@ -267,6 +267,26 @@ JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> AesCbcParams::from_value(J
     return adopt_own<AlgorithmParams>(*new AesCbcParams { name, iv });
 }
 
+AesCtrParams::~AesCtrParams() = default;
+
+JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> AesCtrParams::from_value(JS::VM& vm, JS::Value value)
+{
+    auto& object = value.as_object();
+
+    auto name_value = TRY(object.get("name"));
+    auto name = TRY(name_value.to_string(vm));
+
+    auto iv_value = TRY(object.get("counter"));
+    if (!iv_value.is_object() || !(is<JS::TypedArrayBase>(iv_value.as_object()) || is<JS::ArrayBuffer>(iv_value.as_object()) || is<JS::DataView>(iv_value.as_object())))
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "BufferSource");
+    auto iv = TRY_OR_THROW_OOM(vm, WebIDL::get_buffer_source_copy(iv_value.as_object()));
+
+    auto length_value = TRY(object.get("length"));
+    auto length = TRY(length_value.to_u8(vm));
+
+    return adopt_own<AlgorithmParams>(*new AesCtrParams { name, iv, length });
+}
+
 HKDFParams::~HKDFParams() = default;
 
 JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> HKDFParams::from_value(JS::VM& vm, JS::Value value)
@@ -1394,6 +1414,317 @@ WebIDL::ExceptionOr<JS::Value> AesCbc::get_key_length(AlgorithmParams const& par
 
     // 2. Return the length member of normalizedDerivedKeyAlgorithm.
     return JS::Value(length);
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> AesCtr::import_key(AlgorithmParams const&, Bindings::KeyFormat format, CryptoKey::InternalKeyData key_data, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
+{
+    // 1. If usages contains an entry which is not one of "encrypt", "decrypt", "wrapKey" or "unwrapKey", then throw a SyntaxError.
+    for (auto& usage : key_usages) {
+        if (usage != Bindings::KeyUsage::Encrypt && usage != Bindings::KeyUsage::Decrypt && usage != Bindings::KeyUsage::Wrapkey && usage != Bindings::KeyUsage::Unwrapkey) {
+            return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+        }
+    }
+
+    ByteBuffer data;
+
+    // 2. If format is "raw":
+    if (format == Bindings::KeyFormat::Raw) {
+        // 1. Let data be the octet string contained in keyData.
+        data = key_data.get<ByteBuffer>();
+
+        // 2. If the length in bits of data is not 128, 192 or 256 then throw a DataError.
+        auto length_in_bits = data.size() * 8;
+        if (length_in_bits != 128 && length_in_bits != 192 && length_in_bits != 256) {
+            return WebIDL::DataError::create(m_realm, MUST(String::formatted("Invalid key length '{}' bits (must be either 128, 192, or 256 bits)", length_in_bits)));
+        }
+    }
+
+    // 2. If format is "jwk":
+    else if (format == Bindings::KeyFormat::Jwk) {
+        // 1. -> If keyData is a JsonWebKey dictionary:
+        //         Let jwk equal keyData.
+        //    -> Otherwise:
+        //         Throw a DataError.
+        if (!key_data.has<Bindings::JsonWebKey>())
+            return WebIDL::DataError::create(m_realm, "keyData is not a JsonWebKey dictionary"_string);
+
+        auto& jwk = key_data.get<Bindings::JsonWebKey>();
+
+        // 2. If the kty field of jwk is not "oct", then throw a DataError.
+        if (jwk.kty != "oct"_string)
+            return WebIDL::DataError::create(m_realm, "Invalid key type"_string);
+
+        // 3. If jwk does not meet the requirements of Section 6.4 of JSON Web Algorithms [JWA], then throw a DataError.
+        // Specifically, those requirements are:
+        // * the member "k" is used to represent a symmetric key (or another key whose value is a single octet sequence).
+        // * An "alg" member SHOULD also be present to identify the algorithm intended to be used with the key,
+        //   unless the application uses another means or convention to determine the algorithm used.
+        if (!jwk.k.has_value())
+            return WebIDL::DataError::create(m_realm, "Missing 'k' field"_string);
+
+        if (!jwk.alg.has_value())
+            return WebIDL::DataError::create(m_realm, "Missing 'alg' field"_string);
+
+        // 4. Let data be the octet string obtained by decoding the k field of jwk.
+        data = TRY(parse_jwk_symmetric_key(m_realm, jwk));
+
+        //    5. -> If data has length 128 bits:
+        //              If the alg field of jwk is present, and is not "A128CTR", then throw a DataError.
+        //       -> If data has length 192 bits:
+        //              If the alg field of jwk is present, and is not "A192CTR", then throw a DataError.
+        //       -> If data has length 256 bits:
+        //              If the alg field of jwk is present, and is not "A256CTR", then throw a DataError.
+        //       -> Otherwise:
+        //              throw a DataError.
+        auto data_bits = data.size() * 8;
+        auto const& alg = jwk.alg;
+        if (data_bits == 128 && alg != "A128CTR") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 128 bits, but alg specifies non-128-bit algorithm"_string);
+        } else if (data_bits == 192 && alg != "A192CTR") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 192 bits, but alg specifies non-192-bit algorithm"_string);
+        } else if (data_bits == 256 && alg != "A256CTR") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 256 bits, but alg specifies non-256-bit algorithm"_string);
+        } else {
+            return WebIDL::DataError::create(m_realm, MUST(String::formatted("Invalid key size: {} bits", data_bits)));
+        }
+
+        // 6. If usages is non-empty and the use field of jwk is present and is not "enc", then throw a DataError.
+        if (!key_usages.is_empty() && jwk.use.has_value() && *jwk.use != "enc"_string)
+            return WebIDL::DataError::create(m_realm, "Invalid use field"_string);
+
+        // 7. If the key_ops field of jwk is present, and is invalid according to the requirements of JSON Web Key [JWK]
+        //    or does not contain all of the specified usages values, then throw a DataError.
+        // FIXME: Validate jwk.key_ops against requirements in https://www.rfc-editor.org/rfc/rfc7517#section-4.3
+        if (jwk.key_ops.has_value()) {
+            for (auto const& usage : key_usages) {
+                if (!jwk.key_ops->contains_slow(Bindings::idl_enum_to_string(usage)))
+                    return WebIDL::DataError::create(m_realm, MUST(String::formatted("Missing key_ops field: {}", Bindings::idl_enum_to_string(usage))));
+            }
+        }
+
+        // 8. If the ext field of jwk is present and has the value false and extractable is true, then throw a DataError.
+        if (jwk.ext.has_value() && !*jwk.ext && extractable)
+            return WebIDL::DataError::create(m_realm, "Invalid ext field"_string);
+    }
+
+    // 2. Otherwise:
+    else {
+        // 1. throw a NotSupportedError.
+        return WebIDL::NotSupportedError::create(m_realm, "Only raw and jwk formats are supported"_string);
+    }
+
+    auto data_bits = data.size() * 8;
+
+    // 3. Let key be a new CryptoKey object representing an AES key with value data.
+    auto key = CryptoKey::create(m_realm, move(data));
+
+    // 4. Set the [[type]] internal slot of key to "secret".
+    key->set_type(Bindings::KeyType::Secret);
+
+    // 5. Let algorithm be a new AesKeyAlgorithm.
+    auto algorithm = AesKeyAlgorithm::create(m_realm);
+
+    // 6. Set the name attribute of algorithm to "AES-CTR".
+    algorithm->set_name("AES-CTR"_string);
+
+    // 7. Set the length attribute of algorithm to the length, in bits, of data.
+    algorithm->set_length(data_bits);
+
+    // 8. Set the [[algorithm]] internal slot of key to algorithm.
+    key->set_algorithm(algorithm);
+
+    // 9. Return key.
+    return key;
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> AesCtr::export_key(Bindings::KeyFormat format, JS::NonnullGCPtr<CryptoKey> key)
+{
+    // 1. If the underlying cryptographic key material represented by the [[handle]] internal slot of key cannot be accessed, then throw an OperationError.
+    // Note: In our impl this is always accessible
+
+    JS::GCPtr<JS::Object> result = nullptr;
+
+    // 2. If format is "raw":
+    if (format == Bindings::KeyFormat::Raw) {
+        // 1. Let data be the raw octets of the key represented by [[handle]] internal slot of key.
+        auto data = key->handle().get<ByteBuffer>();
+
+        // 2. Let result be the result of creating an ArrayBuffer containing data.
+        result = JS::ArrayBuffer::create(m_realm, data);
+    }
+
+    // 2. If format is "jwk":
+    else if (format == Bindings::KeyFormat::Jwk) {
+        // 1. Let jwk be a new JsonWebKey dictionary.
+        Bindings::JsonWebKey jwk = {};
+
+        // 2. Set the kty attribute of jwk to the string "oct".
+        jwk.kty = "oct"_string;
+
+        // 3. Set the k attribute of jwk to be a string containing the raw octets of the key represented by [[handle]] internal slot of key,
+        //    encoded according to Section 6.4 of JSON Web Algorithms [JWA].
+        auto const& key_bytes = key->handle().get<ByteBuffer>();
+        jwk.k = TRY_OR_THROW_OOM(m_realm->vm(), encode_base64url(key_bytes, AK::OmitPadding::Yes));
+
+        // 4. -> If the length attribute of key is 128:
+        //        Set the alg attribute of jwk to the string "A128CTR".
+        //    -> If the length attribute of key is 192:
+        //        Set the alg attribute of jwk to the string "A192CTR".
+        //    -> If the length attribute of key is 256:
+        //        Set the alg attribute of jwk to the string "A256CTR".
+        auto key_bits = key_bytes.size() * 8;
+        if (key_bits == 128) {
+            jwk.alg = "A128CTR"_string;
+        } else if (key_bits == 192) {
+            jwk.alg = "A192CTR"_string;
+        } else if (key_bits == 256) {
+            jwk.alg = "A256CTR"_string;
+        }
+
+        // 5. Set the key_ops attribute of jwk to the usages attribute of key.
+        jwk.key_ops = Vector<String> {};
+        jwk.key_ops->ensure_capacity(key->internal_usages().size());
+        for (auto const& usage : key->internal_usages()) {
+            jwk.key_ops->append(Bindings::idl_enum_to_string(usage));
+        }
+
+        // 6. Set the ext attribute of jwk to equal the [[extractable]] internal slot of key.
+        jwk.ext = key->extractable();
+
+        // 7. Let result be the result of converting jwk to an ECMAScript Object, as defined by [WebIDL].
+        result = TRY(jwk.to_object(m_realm));
+    }
+
+    // 2. Otherwise:
+    else {
+        // 1. throw a NotSupportedError.
+        return WebIDL::NotSupportedError::create(m_realm, "Cannot export to unsupported format"_string);
+    }
+
+    // 3. Return result.
+    return JS::NonnullGCPtr { *result };
+}
+
+WebIDL::ExceptionOr<JS::Value> AesCtr::get_key_length(AlgorithmParams const& params)
+{
+    // 1. If the length member of normalizedDerivedKeyAlgorithm is not 128, 192 or 256, then throw a OperationError.
+    auto const& normalized_algorithm = static_cast<AesDerivedKeyParams const&>(params);
+    auto length = normalized_algorithm.length;
+    if (length != 128 && length != 192 && length != 256)
+        return WebIDL::OperationError::create(m_realm, "Invalid key length"_string);
+
+    // 2. Return the length member of normalizedDerivedKeyAlgorithm.
+    return JS::Value(length);
+}
+
+WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> AesCtr::generate_key(AlgorithmParams const& params, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
+{
+    // 1. If usages contains any entry which is not one of "encrypt", "decrypt", "wrapKey" or "unwrapKey", then throw a SyntaxError.
+    for (auto const& usage : key_usages) {
+        if (usage != Bindings::KeyUsage::Encrypt && usage != Bindings::KeyUsage::Decrypt && usage != Bindings::KeyUsage::Wrapkey && usage != Bindings::KeyUsage::Unwrapkey) {
+            return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+        }
+    }
+
+    // 2. If the length member of normalizedAlgorithm is not equal to one of 128, 192 or 256, then throw an OperationError.
+    auto const& normalized_algorithm = static_cast<AesKeyGenParams const&>(params);
+    auto length = normalized_algorithm.length;
+    if (length != 128 && length != 192 && length != 256) {
+        return WebIDL::OperationError::create(m_realm, MUST(String::formatted("Cannot create AES-CTR key with unusual amount of {} bits", length)));
+    }
+
+    // 3. Generate an AES key of length equal to the length member of normalizedAlgorithm.
+    // 4. If the key generation step fails, then throw an OperationError.
+    auto key_buffer = TRY(generate_aes_key(m_realm->vm(), length / 8));
+
+    // 5. Let key be a new CryptoKey object representing the generated AES key.
+    auto key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { key_buffer });
+
+    // 6. Let algorithm be a new AesKeyAlgorithm.
+    auto algorithm = AesKeyAlgorithm::create(m_realm);
+
+    // 7. Set the name attribute of algorithm to "AES-CTR".
+    algorithm->set_name("AES-CTR"_string);
+
+    // 8. Set the length attribute of algorithm to equal the length member of normalizedAlgorithm.
+    algorithm->set_length(length);
+
+    // 9. Set the [[type]] internal slot of key to "secret".
+    key->set_type(Bindings::KeyType::Secret);
+
+    // 10. Set the [[algorithm]] internal slot of key to algorithm.
+    key->set_algorithm(algorithm);
+
+    // 11. Set the [[extractable]] internal slot of key to be extractable.
+    key->set_extractable(extractable);
+
+    // 12. Set the [[usages]] internal slot of key to be usages.
+    key->set_usages(key_usages);
+
+    // 13. Return key.
+    return { key };
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> AesCtr::encrypt(AlgorithmParams const& params, JS::NonnullGCPtr<CryptoKey> key, ByteBuffer const& plaintext)
+{
+    // 1. If the counter member of normalizedAlgorithm does not have length 16 bytes, then throw an OperationError.
+    auto const& normalized_algorithm = static_cast<AesCtrParams const&>(params);
+    auto const& counter = normalized_algorithm.counter;
+    if (counter.size() != 16)
+        return WebIDL::OperationError::create(m_realm, "Invalid counter length"_string);
+
+    // 2. If the length member of normalizedAlgorithm is zero or is greater than 128, then throw an OperationError.
+    auto const& length = normalized_algorithm.length;
+    if (length == 0 || length > 128)
+        return WebIDL::OperationError::create(m_realm, "Invalid length"_string);
+
+    // 3. Let ciphertext be the result of performing the CTR Encryption operation described in Section 6.5 of [NIST-SP800-38A] using
+    //    AES as the block cipher,
+    //    the contents of the counter member of normalizedAlgorithm as the initial value of the counter block,
+    //    the length member of normalizedAlgorithm as the input parameter m to the standard counter block incrementing function defined in Appendix B.1 of [NIST-SP800-38A]
+    //    and the contents of plaintext as the input plaintext.
+    auto& aes_algorithm = static_cast<AesKeyAlgorithm const&>(*key->algorithm());
+    auto key_length = aes_algorithm.length();
+    auto key_bytes = key->handle().get<ByteBuffer>();
+
+    ::Crypto::Cipher::AESCipher::CTRMode cipher(key_bytes, key_length, ::Crypto::Cipher::Intent::Encryption);
+    ByteBuffer ciphertext = TRY_OR_THROW_OOM(m_realm->vm(), ByteBuffer::create_zeroed(plaintext.size()));
+    Bytes ciphertext_span = ciphertext.bytes();
+    cipher.encrypt(plaintext, ciphertext_span, counter);
+
+    // 4. Return the result of creating an ArrayBuffer containing plaintext.
+    return JS::ArrayBuffer::create(m_realm, ciphertext);
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> AesCtr::decrypt(AlgorithmParams const& params, JS::NonnullGCPtr<CryptoKey> key, ByteBuffer const& ciphertext)
+{
+    // 1. If the counter member of normalizedAlgorithm does not have length 16 bytes, then throw an OperationError.
+    auto const& normalized_algorithm = static_cast<AesCtrParams const&>(params);
+    auto const& counter = normalized_algorithm.counter;
+    if (counter.size() != 16)
+        return WebIDL::OperationError::create(m_realm, "Invalid counter length"_string);
+
+    // 2. If the length member of normalizedAlgorithm is zero or is greater than 128, then throw an OperationError.
+    auto const& length = normalized_algorithm.length;
+    if (length == 0 || length > 128)
+        return WebIDL::OperationError::create(m_realm, "Invalid length"_string);
+
+    // 3. Let plaintext be the result of performing the CTR Decryption operation described in Section 6.5 of [NIST-SP800-38A] using
+    //    AES as the block cipher,
+    //    the contents of the counter member of normalizedAlgorithm as the initial value of the counter block,
+    //    the length member of normalizedAlgorithm as the input parameter m to the standard counter block incrementing function defined in Appendix B.1 of [NIST-SP800-38A]
+    //    and the contents of ciphertext as the input ciphertext.
+    auto& aes_algorithm = static_cast<AesKeyAlgorithm const&>(*key->algorithm());
+    auto key_length = aes_algorithm.length();
+    auto key_bytes = key->handle().get<ByteBuffer>();
+
+    ::Crypto::Cipher::AESCipher::CTRMode cipher(key_bytes, key_length, ::Crypto::Cipher::Intent::Decryption);
+    ByteBuffer plaintext = TRY_OR_THROW_OOM(m_realm->vm(), ByteBuffer::create_zeroed(ciphertext.size()));
+    Bytes plaintext_span = plaintext.bytes();
+    cipher.decrypt(ciphertext, plaintext_span, counter);
+
+    // 4. Return the result of creating an ArrayBuffer containing plaintext.
+    return JS::ArrayBuffer::create(m_realm, plaintext);
 }
 
 // https://w3c.github.io/webcrypto/#hkdf-operations

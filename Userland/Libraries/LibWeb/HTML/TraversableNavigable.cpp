@@ -146,14 +146,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<TraversableNavigable>> TraversableNavigable
     //         Skip the initial navigation as well. This matches the behavior of the window open steps.
 
     if (url_matches_about_blank(initial_navigation_url)) {
-        Platform::EventLoopPlugin::the().deferred_invoke([traversable, initial_navigation_url] {
+        Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(traversable->heap(), [traversable, initial_navigation_url] {
             // FIXME: We do this other places too when creating a new about:blank document. Perhaps it's worth a spec issue?
             HTML::HTMLParser::the_end(*traversable->active_document());
 
             // FIXME: If we perform the URL and history update steps here, we start hanging tests and the UI process will
             //        try to load() the initial URLs passed on the command line before we finish processing the events here.
             //        However, because we call this before the PageClient is fully initialized... that gets awkward.
-        });
+        }));
     }
 
     else {
@@ -642,7 +642,7 @@ TraversableNavigable::HistoryStepResult TraversableNavigable::apply_the_history_
                 // 7. In parallel, attempt to populate the history entry's document for targetEntry, given navigable, potentiallyTargetSpecificSourceSnapshotParams,
                 //    targetSnapshotParams, with allowPOST set to allowPOST and completionSteps set to queue a global task on the navigation and traversal task source given
                 //    navigable's active window to run afterDocumentPopulated.
-                Platform::EventLoopPlugin::the().deferred_invoke([populated_target_entry, potentially_target_specific_source_snapshot_params, target_snapshot_params, this, allow_POST, navigable, after_document_populated = JS::create_heap_function(this->heap(), move(after_document_populated))] {
+                Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(this->heap(), [populated_target_entry, potentially_target_specific_source_snapshot_params, target_snapshot_params, this, allow_POST, navigable, after_document_populated = JS::create_heap_function(this->heap(), move(after_document_populated))] {
                     navigable->populate_session_history_entry_document(populated_target_entry, *potentially_target_specific_source_snapshot_params, target_snapshot_params, {}, Empty {}, CSPNavigationType::Other, allow_POST, JS::create_heap_function(this->heap(), [this, after_document_populated, populated_target_entry]() mutable {
                                  VERIFY(active_window());
                                  queue_global_task(Task::Source::NavigationAndTraversal, *active_window(), JS::create_heap_function(this->heap(), [after_document_populated, populated_target_entry]() mutable {
@@ -650,7 +650,7 @@ TraversableNavigable::HistoryStepResult TraversableNavigable::apply_the_history_
                                  }));
                              }))
                         .release_value_but_fixme_should_propagate_errors();
-                });
+                }));
             }
             // Otherwise, run afterDocumentPopulated immediately.
             else {
@@ -659,16 +659,16 @@ TraversableNavigable::HistoryStepResult TraversableNavigable::apply_the_history_
         }));
     }
 
-    auto check_if_document_population_tasks_completed = JS::SafeFunction<bool()>([&] {
+    auto check_if_document_population_tasks_completed = JS::create_heap_function(heap(), [&] {
         return changing_navigable_continuations.size() + completed_change_jobs == total_change_jobs;
     });
 
     if (synchronous_navigation == SynchronousNavigation::Yes) {
         // NOTE: Synchronous navigation should never require document population, so it is safe to process only NavigationAndTraversal source.
-        main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, move(check_if_document_population_tasks_completed));
+        main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, check_if_document_population_tasks_completed);
     } else {
         // NOTE: Process all task sources while waiting because reloading or back/forward navigation might require fetching to populate a document.
-        main_thread_event_loop().spin_until(move(check_if_document_population_tasks_completed));
+        main_thread_event_loop().spin_until(check_if_document_population_tasks_completed);
     }
 
     // 13. Let navigablesThatMustWaitBeforeHandlingSyncNavigation be an empty set.
@@ -788,9 +788,9 @@ TraversableNavigable::HistoryStepResult TraversableNavigable::apply_the_history_
         }
     }
 
-    main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, [&] {
+    main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, JS::create_heap_function(heap(), [&] {
         return completed_change_jobs == total_change_jobs;
-    });
+    }));
 
     // 15. Let totalNonchangingJobs be the size of nonchangingNavigablesThatStillNeedUpdates.
     auto total_non_changing_jobs = non_changing_navigables_that_still_need_updates.size();
@@ -836,9 +836,9 @@ TraversableNavigable::HistoryStepResult TraversableNavigable::apply_the_history_
     // AD-HOC: Since currently populate_session_history_entry_document does not run in parallel
     //         we call spin_until to interrupt execution of this function and let document population
     //         to complete.
-    main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, [&] {
+    main_thread_event_loop().spin_processing_tasks_with_source_until(Task::Source::NavigationAndTraversal, JS::create_heap_function(heap(), [&] {
         return completed_non_changing_jobs == total_non_changing_jobs;
-    });
+    }));
 
     // 20. Set traversable's current session history step to targetStep.
     m_current_session_history_step = target_step;
@@ -941,9 +941,9 @@ TraversableNavigable::CheckIfUnloadingIsCanceledResult TraversableNavigable::che
             }));
 
             // 6. Wait for eventsFired to be true.
-            main_thread_event_loop().spin_until([&] {
+            main_thread_event_loop().spin_until(JS::create_heap_function(heap(), [&] {
                 return events_fired;
-            });
+            }));
 
             // 7. If finalStatus is not "continue", then return finalStatus.
             if (final_status != CheckIfUnloadingIsCanceledResult::Continue)
@@ -977,9 +977,9 @@ TraversableNavigable::CheckIfUnloadingIsCanceledResult TraversableNavigable::che
     }
 
     // 8. Wait for completedTasks to be totalTasks.
-    main_thread_event_loop().spin_until([&] {
+    main_thread_event_loop().spin_until(JS::create_heap_function(heap(), [&] {
         return completed_tasks == total_tasks;
-    });
+    }));
 
     // 9. Return finalStatus.
     return final_status;

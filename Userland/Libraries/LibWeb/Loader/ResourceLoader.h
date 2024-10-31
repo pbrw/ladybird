@@ -11,7 +11,6 @@
 #include <AK/Function.h>
 #include <AK/HashTable.h>
 #include <LibCore/EventReceiver.h>
-#include <LibJS/SafeFunction.h>
 #include <LibRequests/Forward.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Loader/Resource.h>
@@ -22,22 +21,22 @@ namespace Web {
 class ResourceLoader : public Core::EventReceiver {
     C_OBJECT_ABSTRACT(ResourceLoader)
 public:
-    static void initialize(NonnullRefPtr<Requests::RequestClient>);
+    static void initialize(JS::Heap&, NonnullRefPtr<Requests::RequestClient>);
     static ResourceLoader& the();
 
     RefPtr<Resource> load_resource(Resource::Type, LoadRequest&);
 
-    using SuccessCallback = JS::SafeFunction<void(ReadonlyBytes, HTTP::HeaderMap const& response_headers, Optional<u32> status_code)>;
-    using ErrorCallback = JS::SafeFunction<void(ByteString const&, Optional<u32> status_code, ReadonlyBytes payload, HTTP::HeaderMap const& response_headers)>;
-    using TimeoutCallback = JS::SafeFunction<void()>;
+    using SuccessCallback = JS::HeapFunction<void(ReadonlyBytes, HTTP::HeaderMap const& response_headers, Optional<u32> status_code)>;
+    using ErrorCallback = JS::HeapFunction<void(ByteString const&, Optional<u32> status_code, ReadonlyBytes payload, HTTP::HeaderMap const& response_headers)>;
+    using TimeoutCallback = JS::HeapFunction<void()>;
 
-    void load(LoadRequest&, SuccessCallback success_callback, ErrorCallback error_callback = nullptr, Optional<u32> timeout = {}, TimeoutCallback timeout_callback = nullptr);
+    void load(LoadRequest&, JS::Handle<SuccessCallback> success_callback, JS::Handle<ErrorCallback> error_callback = nullptr, Optional<u32> timeout = {}, JS::Handle<TimeoutCallback> timeout_callback = nullptr);
 
-    using OnHeadersReceived = JS::SafeFunction<void(HTTP::HeaderMap const& response_headers, Optional<u32> status_code)>;
-    using OnDataReceived = JS::SafeFunction<void(ReadonlyBytes data)>;
-    using OnComplete = JS::SafeFunction<void(bool success, Optional<StringView> error_message)>;
+    using OnHeadersReceived = JS::HeapFunction<void(HTTP::HeaderMap const& response_headers, Optional<u32> status_code)>;
+    using OnDataReceived = JS::HeapFunction<void(ReadonlyBytes data)>;
+    using OnComplete = JS::HeapFunction<void(bool success, Optional<StringView> error_message)>;
 
-    void load_unbuffered(LoadRequest&, OnHeadersReceived, OnDataReceived, OnComplete);
+    void load_unbuffered(LoadRequest&, JS::Handle<OnHeadersReceived>, JS::Handle<OnDataReceived>, JS::Handle<OnComplete>);
 
     Requests::RequestClient& request_client() { return *m_request_client; }
 
@@ -74,8 +73,10 @@ public:
     void clear_cache();
     void evict_from_cache(LoadRequest const&);
 
+    JS::Heap& heap() { return m_heap; }
+
 private:
-    explicit ResourceLoader(NonnullRefPtr<Requests::RequestClient>);
+    explicit ResourceLoader(JS::Heap&, NonnullRefPtr<Requests::RequestClient>);
 
     RefPtr<Requests::Request> start_network_request(LoadRequest const&);
     void handle_network_response_headers(LoadRequest const&, HTTP::HeaderMap const&);
@@ -83,6 +84,7 @@ private:
 
     int m_pending_loads { 0 };
 
+    JS::Heap& m_heap;
     NonnullRefPtr<Requests::RequestClient> m_request_client;
     HashTable<NonnullRefPtr<Requests::Request>> m_active_requests;
 

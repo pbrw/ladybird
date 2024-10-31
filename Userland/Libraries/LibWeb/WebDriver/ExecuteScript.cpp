@@ -346,7 +346,7 @@ void execute_script(HTML::BrowsingContext const& browsing_context, ByteString bo
     auto promise = WebIDL::create_promise(realm);
 
     // 8. Run the following substeps in parallel:
-    Platform::EventLoopPlugin::the().deferred_invoke([&realm, &browsing_context, promise, document, body = move(body), arguments = move(arguments)]() mutable {
+    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(realm.heap(), [&realm, &browsing_context, promise, document, body = move(body), arguments = move(arguments)]() mutable {
         HTML::TemporaryExecutionContext execution_context { document->relevant_settings_object() };
 
         // 1. Let scriptPromise be the result of promise-calling execute a function body, with arguments body and arguments.
@@ -362,7 +362,7 @@ void execute_script(HTML::BrowsingContext const& browsing_context, ByteString bo
         if (script_result.is_throw_completion()) {
             WebIDL::reject_promise(realm, promise, *script_result.throw_completion().value());
         }
-    });
+    }));
 
     // 9. Wait until promise is resolved, or timer's timeout fired flag is set, whichever occurs first.
     auto reaction_steps = JS::create_heap_function(vm.heap(), [&realm, &browsing_context, promise, timer, on_complete](JS::Value) -> WebIDL::ExceptionOr<JS::Value> {
@@ -425,7 +425,7 @@ void execute_async_script(HTML::BrowsingContext const& browsing_context, ByteStr
     JS::NonnullGCPtr promise { verify_cast<JS::Promise>(*promise_capability->promise()) };
 
     // 8. Run the following substeps in parallel:
-    Platform::EventLoopPlugin::the().deferred_invoke([&vm, &realm, &browsing_context, timer, document, promise_capability, promise, body = move(body), arguments = move(arguments)]() mutable {
+    Platform::EventLoopPlugin::the().deferred_invoke(JS::create_heap_function(realm.heap(), [&vm, &realm, &browsing_context, timer, document, promise_capability, promise, body = move(body), arguments = move(arguments)]() mutable {
         HTML::TemporaryExecutionContext execution_context { document->relevant_settings_object() };
 
         // 1. Let resolvingFunctions be CreateResolvingFunctions(promise).
@@ -470,9 +470,9 @@ void execute_async_script(HTML::BrowsingContext const& browsing_context, ByteStr
             return;
         auto& script_promise = static_cast<JS::Promise&>(*script_promise_or_error.value());
 
-        vm.custom_data()->spin_event_loop_until([&] {
+        vm.custom_data()->spin_event_loop_until(JS::create_heap_function(vm.heap(), [timer, &script_promise]() {
             return timer->is_timed_out() || script_promise.state() != JS::Promise::State::Pending;
-        });
+        }));
 
         // 10. Upon fulfillment of scriptPromise with value v, resolve promise with value v.
         if (script_promise.state() == JS::Promise::State::Fulfilled)
@@ -481,7 +481,7 @@ void execute_async_script(HTML::BrowsingContext const& browsing_context, ByteStr
         // 11. Upon rejection of scriptPromise with value r, reject promise with value r.
         if (script_promise.state() == JS::Promise::State::Rejected)
             WebIDL::reject_promise(realm, promise_capability, script_promise.result());
-    });
+    }));
 
     // 9. Wait until promise is resolved, or timer's timeout fired flag is set, whichever occurs first.
     auto reaction_steps = JS::create_heap_function(vm.heap(), [&realm, &browsing_context, promise, timer, on_complete](JS::Value) -> WebIDL::ExceptionOr<JS::Value> {

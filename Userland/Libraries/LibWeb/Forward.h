@@ -13,8 +13,8 @@
 #include <LibJS/Forward.h>
 
 namespace Web {
+class InputEventsTarget;
 class DragAndDropEventHandler;
-class EditEventHandler;
 class EventHandler;
 class LoadRequest;
 class Page;
@@ -270,6 +270,7 @@ class DOMTokenList;
 class Element;
 class Event;
 class EventHandler;
+class EditingHostManager;
 class EventTarget;
 class HTMLCollection;
 class HTMLFormControlsCollection;
@@ -374,6 +375,7 @@ struct DOMPointInit;
 }
 
 namespace Web::HTML {
+class AnimationFrameCallbackDriver;
 class AudioTrack;
 class AudioTrackList;
 class BroadcastChannel;

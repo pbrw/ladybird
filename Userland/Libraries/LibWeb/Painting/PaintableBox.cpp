@@ -12,6 +12,7 @@
 #include <LibUnicode/CharacterTypes.h>
 #include <LibWeb/CSS/SystemColor.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/Position.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/HTML/HTMLHtmlElement.h>
 #include <LibWeb/HTML/Window.h>
@@ -543,11 +544,15 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
     if (!document.cursor_blink_state())
         return;
 
-    if (document.cursor_position()->node() != paintable.dom_node())
+    auto cursor_position = document.cursor_position();
+    if (!cursor_position || !cursor_position->node())
+        return;
+
+    if (cursor_position->node() != paintable.dom_node())
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    if (document.cursor_position()->offset() < (unsigned)fragment.start() || document.cursor_position()->offset() > (unsigned)(fragment.start() + fragment.length()))
+    if (cursor_position->offset() < (unsigned)fragment.start() || cursor_position->offset() > (unsigned)(fragment.start() + fragment.length()))
         return;
 
     if (!fragment.layout_node().dom_node() || !fragment.layout_node().dom_node()->is_editable())
@@ -901,6 +906,19 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
 
     auto position_adjusted_by_scroll_offset = position;
     position_adjusted_by_scroll_offset.translate_by(-cumulative_offset_of_enclosing_scroll_frame());
+
+    // TextCursor hit testing mode should be able to place cursor in contenteditable elements even if they are empty
+    auto is_editable = layout_node_with_style_and_box_metrics().dom_node() && layout_node_with_style_and_box_metrics().dom_node()->is_editable();
+    if (is_editable && m_fragments.is_empty() && !has_children() && type == HitTestType::TextCursor) {
+        HitTestResult const hit_test_result {
+            .paintable = const_cast<PaintableWithLines&>(*this),
+            .index_in_node = 0,
+            .vertical_distance = 0,
+            .horizontal_distance = 0,
+        };
+        if (callback(hit_test_result) == TraversalDecision::Break)
+            return TraversalDecision::Break;
+    }
 
     if (!layout_node_with_style_and_box_metrics().children_are_inline() || m_fragments.is_empty()) {
         return PaintableBox::hit_test(position, type, callback);

@@ -738,7 +738,7 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(Optional<DocumentOrXMLHttpRequest
 
         // 7. Let processRequestBodyChunkLength, given a bytesLength, be these steps:
         // NOTE: request_body_length is captured by copy as to not UAF it when we leave `send()` and the callback gets called.
-        // NOTE: `this` is kept alive by FetchAlgorithms using JS::SafeFunction.
+        // NOTE: `this` is kept alive by FetchAlgorithms using JS::HeapFunction.
         auto process_request_body_chunk_length = [this, request_body_length](u64 bytes_length) {
             // 1. Increase requestBodyTransmitted by bytesLength.
             m_request_body_transmitted += bytes_length;
@@ -752,7 +752,7 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(Optional<DocumentOrXMLHttpRequest
 
         // 8. Let processRequestEndOfBody be these steps:
         // NOTE: request_body_length is captured by copy as to not UAF it when we leave `send()` and the callback gets called.
-        // NOTE: `this` is kept alive by FetchAlgorithms using JS::SafeFunction.
+        // NOTE: `this` is kept alive by FetchAlgorithms using JS::HeapFunction.
         auto process_request_end_of_body = [this, request_body_length]() {
             // 1. Set this’s upload complete flag.
             m_upload_complete = true;
@@ -772,7 +772,7 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(Optional<DocumentOrXMLHttpRequest
         };
 
         // 9. Let processResponse, given a response, be these steps:
-        // NOTE: `this` is kept alive by FetchAlgorithms using JS::SafeFunction.
+        // NOTE: `this` is kept alive by FetchAlgorithms using JS::HeapFunction.
         auto process_response = [this](JS::NonnullGCPtr<Fetch::Infrastructure::Response> response) {
             // 1. Set this’s response to response.
             m_response = response;
@@ -876,16 +876,17 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(Optional<DocumentOrXMLHttpRequest
         //     1. Wait until either req’s done flag is set or this’s timeout is not 0 and this’s timeout milliseconds have passed since now.
         //     2. If req’s done flag is unset, then set this’s timed out flag and terminate this’s fetch controller.
         if (m_timeout != 0) {
-            auto timer = Platform::Timer::create_single_shot(m_timeout, nullptr);
+            auto timer = Platform::Timer::create_single_shot(heap(), m_timeout, nullptr);
 
-            // NOTE: `timer` is kept alive by copying the NNRP into the lambda, incrementing its ref-count.
-            // NOTE: `this` and `request` is kept alive by Platform::Timer using JS::SafeFunction.
-            timer->on_timeout = [this, request, timer]() {
+            // NOTE: `timer` is kept alive by capturing into the lambda for the GC to see
+            // NOTE: `this` and `request` is kept alive by Platform::Timer using a Handle.
+            timer->on_timeout = JS::create_heap_function(heap(), [this, request, timer = JS::make_handle(timer)]() {
+                (void)timer;
                 if (!request->done()) {
                     m_timed_out = true;
                     m_fetch_controller->terminate();
                 }
-            };
+            });
 
             timer->start();
         }
@@ -929,20 +930,21 @@ WebIDL::ExceptionOr<void> XMLHttpRequest::send(Optional<DocumentOrXMLHttpRequest
         bool did_time_out = false;
 
         if (m_timeout != 0) {
-            auto timer = Platform::Timer::create_single_shot(m_timeout, nullptr);
+            auto timer = Platform::Timer::create_single_shot(heap(), m_timeout, nullptr);
 
-            // NOTE: `timer` is kept alive by copying the NNRP into the lambda, incrementing its ref-count.
-            timer->on_timeout = [timer, &did_time_out]() {
+            // NOTE: `timer` is kept alive by capturing into the lambda for the GC to see
+            timer->on_timeout = JS::create_heap_function(heap(), [timer = JS::make_handle(timer), &did_time_out]() {
+                (void)timer;
                 did_time_out = true;
-            };
+            });
 
             timer->start();
         }
 
         // FIXME: This is not exactly correct, as it allows the HTML event loop to continue executing tasks.
-        Platform::EventLoopPlugin::the().spin_until([&]() {
+        Platform::EventLoopPlugin::the().spin_until(JS::create_heap_function(heap(), [&]() {
             return processed_response || did_time_out;
-        });
+        }));
 
         // 6. If processedResponse is false, then set this’s timed out flag and terminate this’s fetch controller.
         if (!processed_response) {

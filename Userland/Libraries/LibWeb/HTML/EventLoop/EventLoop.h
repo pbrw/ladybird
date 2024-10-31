@@ -10,7 +10,6 @@
 #include <AK/WeakPtr.h>
 #include <LibCore/Forward.h>
 #include <LibJS/Forward.h>
-#include <LibJS/SafeFunction.h>
 #include <LibWeb/HTML/EventLoop/TaskQueue.h>
 
 namespace Web::HTML {
@@ -39,8 +38,8 @@ public:
     TaskQueue& microtask_queue() { return *m_microtask_queue; }
     TaskQueue const& microtask_queue() const { return *m_microtask_queue; }
 
-    void spin_until(JS::SafeFunction<bool()> goal_condition);
-    void spin_processing_tasks_with_source_until(Task::Source, JS::SafeFunction<bool()> goal_condition);
+    void spin_until(JS::NonnullGCPtr<JS::HeapFunction<bool()>> goal_condition);
+    void spin_processing_tasks_with_source_until(Task::Source, JS::NonnullGCPtr<JS::HeapFunction<bool()>> goal_condition);
     void process();
     void queue_task_to_update_the_rendering();
 
@@ -96,7 +95,7 @@ private:
     // https://html.spec.whatwg.org/multipage/webappapis.html#last-idle-period-start-time
     double m_last_idle_period_start_time { 0 };
 
-    RefPtr<Platform::Timer> m_system_event_loop_timer;
+    JS::GCPtr<Platform::Timer> m_system_event_loop_timer;
 
     // https://html.spec.whatwg.org/#performing-a-microtask-checkpoint
     bool m_performing_a_microtask_checkpoint { false };

@@ -66,6 +66,22 @@ struct AesCbcParams : public AlgorithmParams {
     static JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> from_value(JS::VM&, JS::Value);
 };
 
+// https://w3c.github.io/webcrypto/#dfn-AesCtrParams
+struct AesCtrParams : public AlgorithmParams {
+    virtual ~AesCtrParams() override;
+    AesCtrParams(String name, ByteBuffer counter, u8 length)
+        : AlgorithmParams(move(name))
+        , counter(move(counter))
+        , length(length)
+    {
+    }
+
+    ByteBuffer counter;
+    u8 length;
+
+    static JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> from_value(JS::VM&, JS::Value);
+};
+
 // https://w3c.github.io/webcrypto/#hkdf-params
 struct HKDFParams : public AlgorithmParams {
     virtual ~HKDFParams() override;
@@ -322,6 +338,24 @@ public:
 
 private:
     explicit AesCbc(JS::Realm& realm)
+        : AlgorithmMethods(realm)
+    {
+    }
+};
+
+class AesCtr : public AlgorithmMethods {
+public:
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> import_key(AlgorithmParams const&, Bindings::KeyFormat, CryptoKey::InternalKeyData, bool, Vector<Bindings::KeyUsage> const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> export_key(Bindings::KeyFormat, JS::NonnullGCPtr<CryptoKey>) override;
+    virtual WebIDL::ExceptionOr<JS::Value> get_key_length(AlgorithmParams const&) override;
+    virtual WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> generate_key(AlgorithmParams const&, bool, Vector<Bindings::KeyUsage> const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> encrypt(AlgorithmParams const&, JS::NonnullGCPtr<CryptoKey>, ByteBuffer const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> decrypt(AlgorithmParams const&, JS::NonnullGCPtr<CryptoKey>, ByteBuffer const&) override;
+
+    static NonnullOwnPtr<AlgorithmMethods> create(JS::Realm& realm) { return adopt_own(*new AesCtr(realm)); }
+
+private:
+    explicit AesCtr(JS::Realm& realm)
         : AlgorithmMethods(realm)
     {
     }

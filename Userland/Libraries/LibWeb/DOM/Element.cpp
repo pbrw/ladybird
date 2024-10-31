@@ -2913,10 +2913,15 @@ Optional<String> Element::lang() const
 
     // 2. If the node is an HTML element or an element in the SVG namespace, and it has a lang in no namespace attribute set
     //      Use the value of that attribute.
+    // If the attribute value is the empty string (lang=""), the language is set to unknown
+    // https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/lang
     if (is_html_element() || namespace_uri() == Namespace::SVG) {
         auto maybe_lang = get_attribute(HTML::AttributeNames::lang);
-        if (maybe_lang.has_value())
+        if (maybe_lang.has_value()) {
+            if (maybe_lang.value().is_empty())
+                return {};
             return maybe_lang.release_value();
+        }
     }
 
     // 3. If the node's parent is a shadow root

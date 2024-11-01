@@ -9,6 +9,7 @@
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/GlobalEventHandlers.h>
+#include <LibWeb/HTML/HTMLOrSVGElement.h>
 #include <LibWeb/HTML/TokenizedFeatures.h>
 
 namespace Web::HTML {
@@ -21,7 +22,8 @@ namespace Web::HTML {
 
 class HTMLElement
     : public DOM::Element
-    , public HTML::GlobalEventHandlers {
+    , public HTML::GlobalEventHandlers
+    , public HTML::HTMLOrSVGElement<HTMLElement> {
     WEB_PLATFORM_OBJECT(HTMLElement, DOM::Element);
     JS_DECLARE_ALLOCATOR(HTMLElement);
 
@@ -53,13 +55,7 @@ public:
 
     bool cannot_navigate() const;
 
-    [[nodiscard]] JS::NonnullGCPtr<DOMStringMap> dataset();
-
-    void focus();
-
     void click();
-
-    void blur();
 
     [[nodiscard]] String access_key_label() const;
 
@@ -86,6 +82,9 @@ protected:
     virtual void initialize(JS::Realm&) override;
 
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value) override;
+    virtual void attribute_change_steps(FlyString const&, Optional<String> const&, Optional<String> const&, Optional<FlyString> const&) override;
+    virtual WebIDL::ExceptionOr<void> cloned(DOM::Node&, bool) override;
+    virtual void inserted() override;
 
     virtual void visit_edges(Cell::Visitor&) override;
 
@@ -100,8 +99,6 @@ private:
     [[nodiscard]] String get_the_text_steps();
     void append_rendered_text_fragment(StringView input);
 
-    JS::GCPtr<DOMStringMap> m_dataset;
-
     JS::GCPtr<DOM::NodeList> m_labels;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#attached-internals
@@ -113,9 +110,6 @@ private:
         Inherit,
     };
     ContentEditableState m_content_editable_state { ContentEditableState::Inherit };
-
-    // https://html.spec.whatwg.org/multipage/interaction.html#locked-for-focus
-    bool m_locked_for_focus { false };
 
     // https://html.spec.whatwg.org/multipage/interaction.html#click-in-progress-flag
     bool m_click_in_progress { false };

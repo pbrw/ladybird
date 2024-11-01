@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2024, Andrew Kaster <akaster@serenityos.org>
+ * Copyright (c) 2024, stelar7 <dudedbz@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -78,6 +79,24 @@ struct AesCtrParams : public AlgorithmParams {
 
     ByteBuffer counter;
     u8 length;
+
+    static JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> from_value(JS::VM&, JS::Value);
+};
+
+// https://w3c.github.io/webcrypto/#dfn-AesGcmParams
+struct AesGcmParams : public AlgorithmParams {
+    virtual ~AesGcmParams() override;
+    AesGcmParams(String name, ByteBuffer iv, Optional<ByteBuffer> additional_data, Optional<u8> tag_length)
+        : AlgorithmParams(move(name))
+        , iv(move(iv))
+        , additional_data(move(additional_data))
+        , tag_length(tag_length)
+    {
+    }
+
+    ByteBuffer iv;
+    Optional<ByteBuffer> additional_data;
+    Optional<u8> tag_length;
 
     static JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> from_value(JS::VM&, JS::Value);
 };
@@ -361,6 +380,24 @@ private:
     }
 };
 
+class AesGcm : public AlgorithmMethods {
+public:
+    virtual WebIDL::ExceptionOr<JS::Value> get_key_length(AlgorithmParams const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> import_key(AlgorithmParams const&, Bindings::KeyFormat, CryptoKey::InternalKeyData, bool, Vector<Bindings::KeyUsage> const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> export_key(Bindings::KeyFormat, JS::NonnullGCPtr<CryptoKey>) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> encrypt(AlgorithmParams const&, JS::NonnullGCPtr<CryptoKey>, ByteBuffer const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> decrypt(AlgorithmParams const&, JS::NonnullGCPtr<CryptoKey>, ByteBuffer const&) override;
+    virtual WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> generate_key(AlgorithmParams const&, bool, Vector<Bindings::KeyUsage> const&) override;
+
+    static NonnullOwnPtr<AlgorithmMethods> create(JS::Realm& realm) { return adopt_own(*new AesGcm(realm)); }
+
+private:
+    explicit AesGcm(JS::Realm& realm)
+        : AlgorithmMethods(realm)
+    {
+    }
+};
+
 class HKDF : public AlgorithmMethods {
 public:
     virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> import_key(AlgorithmParams const&, Bindings::KeyFormat, CryptoKey::InternalKeyData, bool, Vector<Bindings::KeyUsage> const&) override;
@@ -434,6 +471,36 @@ private:
         : AlgorithmMethods(realm)
     {
     }
+};
+
+class X25519 : public AlgorithmMethods {
+public:
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> derive_bits(AlgorithmParams const&, JS::NonnullGCPtr<CryptoKey>, Optional<u32>) override;
+    virtual WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> generate_key(AlgorithmParams const&, bool, Vector<Bindings::KeyUsage> const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> import_key(AlgorithmParams const&, Bindings::KeyFormat, CryptoKey::InternalKeyData, bool, Vector<Bindings::KeyUsage> const&) override;
+    virtual WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> export_key(Bindings::KeyFormat, JS::NonnullGCPtr<CryptoKey>) override;
+
+    static NonnullOwnPtr<AlgorithmMethods> create(JS::Realm& realm) { return adopt_own(*new X25519(realm)); }
+
+private:
+    explicit X25519(JS::Realm& realm)
+        : AlgorithmMethods(realm)
+    {
+    }
+};
+
+struct EcdhKeyDerivePrams : public AlgorithmParams {
+    virtual ~EcdhKeyDerivePrams() override;
+
+    EcdhKeyDerivePrams(String name, CryptoKey& public_key)
+        : AlgorithmParams(move(name))
+        , public_key(public_key)
+    {
+    }
+
+    JS::NonnullGCPtr<CryptoKey> public_key;
+
+    static JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> from_value(JS::VM&, JS::Value);
 };
 
 ErrorOr<String> base64_url_uint_encode(::Crypto::UnsignedBigInteger);

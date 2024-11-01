@@ -1144,7 +1144,7 @@ void Document::update_layout()
 
     // NOTE: If our parent document needs a relayout, we must do that *first*.
     //       This is necessary as the parent layout may cause our viewport to change.
-    if (navigable->container())
+    if (navigable->container() && &navigable->container()->document() != this)
         navigable->container()->document().update_layout();
 
     update_style();
@@ -2679,7 +2679,7 @@ bool Document::is_fully_active() const
         return true;
 
     auto container_document = navigable->container_document();
-    if (container_document && container_document->is_fully_active())
+    if (container_document && container_document != this && container_document->is_fully_active())
         return true;
 
     return false;
@@ -3240,7 +3240,11 @@ Vector<JS::Handle<HTML::Navigable>> Document::descendant_navigables()
                 return TraversalDecision::Continue;
 
             // 2. Extend navigables with navigableContainer's content navigable's active document's inclusive descendant navigables.
-            navigables.extend(navigable_container.content_navigable()->active_document()->inclusive_descendant_navigables());
+            auto document = navigable_container.content_navigable()->active_document();
+            // AD-HOC: If the descendant navigable doesn't have an active document, just skip over it.
+            if (!document)
+                return TraversalDecision::Continue;
+            navigables.extend(document->inclusive_descendant_navigables());
         }
         return TraversalDecision::Continue;
     });
@@ -5131,7 +5135,7 @@ size_t Document::broadcast_active_resize_observations()
         }
 
         // 2. Let entries be an empty list of ResizeObserverEntryies.
-        Vector<JS::NonnullGCPtr<ResizeObserver::ResizeObserverEntry>> entries;
+        JS::MarkedVector<JS::NonnullGCPtr<ResizeObserver::ResizeObserverEntry>> entries(heap());
 
         // 3. For each observation in [[activeTargets]] perform these steps:
         for (auto const& observation : observer->active_targets()) {

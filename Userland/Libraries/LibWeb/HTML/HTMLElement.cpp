@@ -17,31 +17,23 @@
 #include <LibWeb/DOM/ShadowRoot.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CustomElements/CustomElementDefinition.h>
-#include <LibWeb/HTML/DOMStringMap.h>
 #include <LibWeb/HTML/ElementInternals.h>
 #include <LibWeb/HTML/EventHandler.h>
-#include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
-#include <LibWeb/HTML/HTMLAreaElement.h>
 #include <LibWeb/HTML/HTMLBRElement.h>
 #include <LibWeb/HTML/HTMLBaseElement.h>
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/HTMLLabelElement.h>
 #include <LibWeb/HTML/HTMLParagraphElement.h>
-#include <LibWeb/HTML/NavigableContainer.h>
-#include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/CharacterTypes.h>
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/Layout/Box.h>
-#include <LibWeb/Layout/BreakNode.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/UIEvents/EventNames.h>
-#include <LibWeb/UIEvents/FocusEvent.h>
-#include <LibWeb/UIEvents/MouseEvent.h>
 #include <LibWeb/UIEvents/PointerEvent.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -66,16 +58,9 @@ void HTMLElement::initialize(JS::Realm& realm)
 void HTMLElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_dataset);
+    HTMLOrSVGElement::visit_edges(visitor);
     visitor.visit(m_labels);
     visitor.visit(m_attached_internals);
-}
-
-JS::NonnullGCPtr<DOMStringMap> HTMLElement::dataset()
-{
-    if (!m_dataset)
-        m_dataset = DOMStringMap::create(*this);
-    return *m_dataset;
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-dir
@@ -591,26 +576,23 @@ void HTMLElement::attribute_changed(FlyString const& name, Optional<String> cons
 #undef __ENUMERATE
 }
 
-// https://html.spec.whatwg.org/multipage/interaction.html#dom-focus
-void HTMLElement::focus()
+void HTMLElement::attribute_change_steps(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
-    // 1. If the element is marked as locked for focus, then return.
-    if (m_locked_for_focus)
-        return;
+    Base::attribute_change_steps(local_name, old_value, value, namespace_);
+    HTMLOrSVGElement::attribute_change_steps(local_name, old_value, value, namespace_);
+}
 
-    // 2. Mark the element as locked for focus.
-    m_locked_for_focus = true;
+WebIDL::ExceptionOr<void> HTMLElement::cloned(Web::DOM::Node& copy, bool clone_children)
+{
+    TRY(Base::cloned(copy, clone_children));
+    TRY(HTMLOrSVGElement::cloned(copy, clone_children));
+    return {};
+}
 
-    // 3. Run the focusing steps for the element.
-    run_focusing_steps(this);
-
-    // FIXME: 4. If the value of the preventScroll dictionary member of options is false,
-    //           then scroll the element into view with scroll behavior "auto",
-    //           block flow direction position set to an implementation-defined value,
-    //           and inline base direction position set to an implementation-defined value.
-
-    // 5. Unmark the element as locked for focus.
-    m_locked_for_focus = false;
+void HTMLElement::inserted()
+{
+    Base::inserted();
+    HTMLOrSVGElement::inserted();
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fire-a-synthetic-pointer-event
@@ -683,15 +665,6 @@ void HTMLElement::click()
 
     // 5. Unset this element's click in progress flag.
     m_click_in_progress = false;
-}
-
-// https://html.spec.whatwg.org/multipage/interaction.html#dom-blur
-void HTMLElement::blur()
-{
-    // The blur() method, when invoked, should run the unfocusing steps for the element on which the method was called.
-    run_unfocusing_steps(this);
-
-    // User agents may selectively or uniformly ignore calls to this method for usability reasons.
 }
 
 Optional<ARIA::Role> HTMLElement::default_role() const

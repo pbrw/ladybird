@@ -1,16 +1,19 @@
 /*
  * Copyright (c) 2024, Andrew Kaster <akaster@serenityos.org>
+ * Copyright (c) 2024, stelar7 <dudedbz@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Base64.h>
 #include <AK/QuickSort.h>
+#include <LibCrypto/ASN1/ASN1.h>
 #include <LibCrypto/ASN1/DER.h>
 #include <LibCrypto/Authentication/HMAC.h>
 #include <LibCrypto/Cipher/AES.h>
 #include <LibCrypto/Curves/Ed25519.h>
 #include <LibCrypto/Curves/SECPxxxr1.h>
+#include <LibCrypto/Curves/X25519.h>
 #include <LibCrypto/Hash/HKDF.h>
 #include <LibCrypto/Hash/HashManager.h>
 #include <LibCrypto/Hash/MGF.h>
@@ -19,6 +22,7 @@
 #include <LibCrypto/Hash/SHA2.h>
 #include <LibCrypto/PK/RSA.h>
 #include <LibCrypto/Padding/OAEP.h>
+#include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/DataView.h>
 #include <LibJS/Runtime/TypedArray.h>
@@ -166,6 +170,11 @@ static WebIDL::ExceptionOr<Structure> parse_an_ASN1_structure(JS::Realm& realm, 
         if (maybe_private_key.is_error())
             return WebIDL::DataError::create(realm, MUST(String::formatted("Error parsing privateKeyInfo: {}", maybe_private_key.release_error())));
         structure = maybe_private_key.release_value();
+    } else if constexpr (IsSame<Structure, StringView>) {
+        auto read_result = decoder.read<StringView>(::Crypto::ASN1::Class::Universal, ::Crypto::ASN1::Kind::OctetString);
+        if (read_result.is_error())
+            return WebIDL::DataError::create(realm, MUST(String::formatted("Read of kind OctetString failed: {}", read_result.error())));
+        structure = read_result.release_value();
     } else {
         static_assert(DependentFalse<Structure>, "Don't know how to parse ASN.1 structure type");
     }
@@ -285,6 +294,37 @@ JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> AesCtrParams::from_value(J
     auto length = TRY(length_value.to_u8(vm));
 
     return adopt_own<AlgorithmParams>(*new AesCtrParams { name, iv, length });
+}
+
+AesGcmParams::~AesGcmParams() = default;
+
+JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> AesGcmParams::from_value(JS::VM& vm, JS::Value value)
+{
+    auto& object = value.as_object();
+
+    auto name_value = TRY(object.get("name"));
+    auto name = TRY(name_value.to_string(vm));
+
+    auto iv_value = TRY(object.get("iv"));
+    if (!iv_value.is_object() || !(is<JS::TypedArrayBase>(iv_value.as_object()) || is<JS::ArrayBuffer>(iv_value.as_object()) || is<JS::DataView>(iv_value.as_object())))
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "BufferSource");
+    auto iv = TRY_OR_THROW_OOM(vm, WebIDL::get_buffer_source_copy(iv_value.as_object()));
+
+    auto maybe_additional_data = Optional<ByteBuffer> {};
+    if (MUST(object.has_property("additionalData"))) {
+        auto additional_data_value = TRY(object.get("additionalData"));
+        if (!additional_data_value.is_object() || !(is<JS::TypedArrayBase>(additional_data_value.as_object()) || is<JS::ArrayBuffer>(additional_data_value.as_object()) || is<JS::DataView>(additional_data_value.as_object())))
+            return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "BufferSource");
+        maybe_additional_data = TRY_OR_THROW_OOM(vm, WebIDL::get_buffer_source_copy(additional_data_value.as_object()));
+    }
+
+    auto maybe_tag_length = Optional<u8> {};
+    if (MUST(object.has_property("tagLength"))) {
+        auto tag_length_value = TRY(object.get("tagLength"));
+        maybe_tag_length = TRY(tag_length_value.to_u8(vm));
+    }
+
+    return adopt_own<AlgorithmParams>(*new AesGcmParams { name, iv, maybe_additional_data, maybe_tag_length });
 }
 
 HKDFParams::~HKDFParams() = default;
@@ -502,6 +542,27 @@ JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> AesDerivedKeyParams::from_
     auto length = TRY(length_value.to_u16(vm));
 
     return adopt_own<AlgorithmParams>(*new AesDerivedKeyParams { name, length });
+}
+
+EcdhKeyDerivePrams::~EcdhKeyDerivePrams() = default;
+
+JS::ThrowCompletionOr<NonnullOwnPtr<AlgorithmParams>> EcdhKeyDerivePrams::from_value(JS::VM& vm, JS::Value value)
+{
+    auto& object = value.as_object();
+
+    auto name_value = TRY(object.get("name"));
+    auto name = TRY(name_value.to_string(vm));
+
+    auto key_value = TRY(object.get("public"));
+    auto key_object = TRY(key_value.to_object(vm));
+
+    if (!is<CryptoKey>(*key_object)) {
+        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "CryptoKey");
+    }
+
+    auto& key = verify_cast<CryptoKey>(*key_object);
+
+    return adopt_own<AlgorithmParams>(*new EcdhKeyDerivePrams { name, key });
 }
 
 // https://w3c.github.io/webcrypto/#rsa-oaep-operations
@@ -1727,6 +1788,373 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> AesCtr::decrypt(Algorithm
     return JS::ArrayBuffer::create(m_realm, plaintext);
 }
 
+WebIDL::ExceptionOr<JS::Value> AesGcm::get_key_length(AlgorithmParams const& params)
+{
+    // 1. If the length member of normalizedDerivedKeyAlgorithm is not 128, 192 or 256, then throw a OperationError.
+    auto const& normalized_algorithm = static_cast<AesDerivedKeyParams const&>(params);
+    auto length = normalized_algorithm.length;
+    if (length != 128 && length != 192 && length != 256)
+        return WebIDL::OperationError::create(m_realm, "Invalid key length"_string);
+
+    // 2. Return the length member of normalizedDerivedKeyAlgorithm.
+    return JS::Value(length);
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> AesGcm::import_key(AlgorithmParams const&, Bindings::KeyFormat format, CryptoKey::InternalKeyData key_data, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
+{
+    // 1. If usages contains an entry which is not one of "encrypt", "decrypt", "wrapKey" or "unwrapKey", then throw a SyntaxError.
+    for (auto& usage : key_usages) {
+        if (usage != Bindings::KeyUsage::Encrypt && usage != Bindings::KeyUsage::Decrypt && usage != Bindings::KeyUsage::Wrapkey && usage != Bindings::KeyUsage::Unwrapkey) {
+            return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+        }
+    }
+
+    ByteBuffer data;
+
+    // 2. If format is "raw":
+    if (format == Bindings::KeyFormat::Raw) {
+        // 1. Let data be the octet string contained in keyData.
+        data = key_data.get<ByteBuffer>();
+
+        // 2. If the length in bits of data is not 128, 192 or 256 then throw a DataError.
+        auto length_in_bits = data.size() * 8;
+        if (length_in_bits != 128 && length_in_bits != 192 && length_in_bits != 256) {
+            return WebIDL::DataError::create(m_realm, MUST(String::formatted("Invalid key length '{}' bits (must be either 128, 192, or 256 bits)", length_in_bits)));
+        }
+    }
+
+    // 2. If format is "jwk":
+    else if (format == Bindings::KeyFormat::Jwk) {
+        // 1. -> If keyData is a JsonWebKey dictionary:
+        //         Let jwk equal keyData.
+        //    -> Otherwise:
+        //         Throw a DataError.
+        if (!key_data.has<Bindings::JsonWebKey>())
+            return WebIDL::DataError::create(m_realm, "keyData is not a JsonWebKey dictionary"_string);
+
+        auto& jwk = key_data.get<Bindings::JsonWebKey>();
+
+        // 2. If the kty field of jwk is not "oct", then throw a DataError.
+        if (jwk.kty != "oct"_string)
+            return WebIDL::DataError::create(m_realm, "Invalid key type"_string);
+
+        // 3. If jwk does not meet the requirements of Section 6.4 of JSON Web Algorithms [JWA], then throw a DataError.
+        // Specifically, those requirements are:
+        // * the member "k" is used to represent a symmetric key (or another key whose value is a single octet sequence).
+        // * An "alg" member SHOULD also be present to identify the algorithm intended to be used with the key,
+        //   unless the application uses another means or convention to determine the algorithm used.
+        if (!jwk.k.has_value())
+            return WebIDL::DataError::create(m_realm, "Missing 'k' field"_string);
+
+        if (!jwk.alg.has_value())
+            return WebIDL::DataError::create(m_realm, "Missing 'alg' field"_string);
+
+        // 4. Let data be the octet string obtained by decoding the k field of jwk.
+        data = TRY(parse_jwk_symmetric_key(m_realm, jwk));
+
+        //    5. -> If data has length 128 bits:
+        //              If the alg field of jwk is present, and is not "A128GCM", then throw a DataError.
+        //       -> If data has length 192 bits:
+        //              If the alg field of jwk is present, and is not "A192GCM", then throw a DataError.
+        //       -> If data has length 256 bits:
+        //              If the alg field of jwk is present, and is not "A256GCM", then throw a DataError.
+        //       -> Otherwise:
+        //              throw a DataError.
+        auto data_bits = data.size() * 8;
+        auto const& alg = jwk.alg;
+        if (data_bits == 128 && alg != "A128GCM") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 128 bits, but alg specifies non-128-bit algorithm"_string);
+        } else if (data_bits == 192 && alg != "A192GCM") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 192 bits, but alg specifies non-192-bit algorithm"_string);
+        } else if (data_bits == 256 && alg != "A256GCM") {
+            return WebIDL::DataError::create(m_realm, "Contradictory key size: key has 256 bits, but alg specifies non-256-bit algorithm"_string);
+        } else {
+            return WebIDL::DataError::create(m_realm, MUST(String::formatted("Invalid key size: {} bits", data_bits)));
+        }
+
+        // 6. If usages is non-empty and the use field of jwk is present and is not "enc", then throw a DataError.
+        if (!key_usages.is_empty() && jwk.use.has_value() && *jwk.use != "enc"_string)
+            return WebIDL::DataError::create(m_realm, "Invalid use field"_string);
+
+        // 7. If the key_ops field of jwk is present, and is invalid according to the requirements of JSON Web Key [JWK]
+        //    or does not contain all of the specified usages values, then throw a DataError.
+        // FIXME: Validate jwk.key_ops against requirements in https://www.rfc-editor.org/rfc/rfc7517#section-4.3
+        if (jwk.key_ops.has_value()) {
+            for (auto const& usage : key_usages) {
+                if (!jwk.key_ops->contains_slow(Bindings::idl_enum_to_string(usage)))
+                    return WebIDL::DataError::create(m_realm, MUST(String::formatted("Missing key_ops field: {}", Bindings::idl_enum_to_string(usage))));
+            }
+        }
+
+        // 8. If the ext field of jwk is present and has the value false and extractable is true, then throw a DataError.
+        if (jwk.ext.has_value() && !*jwk.ext && extractable)
+            return WebIDL::DataError::create(m_realm, "Invalid ext field"_string);
+    }
+
+    // 2. Otherwise:
+    else {
+        // 1. throw a NotSupportedError.
+        return WebIDL::NotSupportedError::create(m_realm, "Only raw and jwk formats are supported"_string);
+    }
+
+    auto data_bits = data.size() * 8;
+
+    // 3. Let key be a new CryptoKey object representing an AES key with value data.
+    auto key = CryptoKey::create(m_realm, move(data));
+
+    // 4. Set the [[type]] internal slot of key to "secret".
+    key->set_type(Bindings::KeyType::Secret);
+
+    // 5. Let algorithm be a new AesKeyAlgorithm.
+    auto algorithm = AesKeyAlgorithm::create(m_realm);
+
+    // 6. Set the name attribute of algorithm to "AES-GCM".
+    algorithm->set_name("AES-GCM"_string);
+
+    // 7. Set the length attribute of algorithm to the length, in bits, of data.
+    algorithm->set_length(data_bits);
+
+    // 8. Set the [[algorithm]] internal slot of key to algorithm.
+    key->set_algorithm(algorithm);
+
+    // 9. Return key.
+    return key;
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> AesGcm::export_key(Bindings::KeyFormat format, JS::NonnullGCPtr<CryptoKey> key)
+{
+    // 1. If the underlying cryptographic key material represented by the [[handle]] internal slot of key cannot be accessed, then throw an OperationError.
+    // Note: In our impl this is always accessible
+
+    JS::GCPtr<JS::Object> result = nullptr;
+
+    // 2. If format is "raw":
+    if (format == Bindings::KeyFormat::Raw) {
+        // 1. Let data be the raw octets of the key represented by [[handle]] internal slot of key.
+        auto data = key->handle().get<ByteBuffer>();
+
+        // 2. Let result be the result of creating an ArrayBuffer containing data.
+        result = JS::ArrayBuffer::create(m_realm, data);
+    }
+
+    // 2. If format is "jwk":
+    else if (format == Bindings::KeyFormat::Jwk) {
+        // 1. Let jwk be a new JsonWebKey dictionary.
+        Bindings::JsonWebKey jwk = {};
+
+        // 2. Set the kty attribute of jwk to the string "oct".
+        jwk.kty = "oct"_string;
+
+        // 3. Set the k attribute of jwk to be a string containing the raw octets of the key represented by [[handle]] internal slot of key,
+        //    encoded according to Section 6.4 of JSON Web Algorithms [JWA].
+        auto const& key_bytes = key->handle().get<ByteBuffer>();
+        jwk.k = TRY_OR_THROW_OOM(m_realm->vm(), encode_base64url(key_bytes, AK::OmitPadding::Yes));
+
+        // 4. -> If the length attribute of key is 128:
+        //        Set the alg attribute of jwk to the string "A128GCM".
+        //    -> If the length attribute of key is 192:
+        //        Set the alg attribute of jwk to the string "A192GCM".
+        //    -> If the length attribute of key is 256:
+        //        Set the alg attribute of jwk to the string "A256GCM".
+        auto key_bits = key_bytes.size() * 8;
+        if (key_bits == 128) {
+            jwk.alg = "A128GCM"_string;
+        } else if (key_bits == 192) {
+            jwk.alg = "A192GCM"_string;
+        } else if (key_bits == 256) {
+            jwk.alg = "A256GCM"_string;
+        }
+
+        // 5. Set the key_ops attribute of jwk to the usages attribute of key.
+        jwk.key_ops = Vector<String> {};
+        jwk.key_ops->ensure_capacity(key->internal_usages().size());
+        for (auto const& usage : key->internal_usages()) {
+            jwk.key_ops->append(Bindings::idl_enum_to_string(usage));
+        }
+
+        // 6. Set the ext attribute of jwk to equal the [[extractable]] internal slot of key.
+        jwk.ext = key->extractable();
+
+        // 7. Let result be the result of converting jwk to an ECMAScript Object, as defined by [WebIDL].
+        result = TRY(jwk.to_object(m_realm));
+    }
+
+    // 2. Otherwise:
+    else {
+        // 1. throw a NotSupportedError.
+        return WebIDL::NotSupportedError::create(m_realm, "Cannot export to unsupported format"_string);
+    }
+
+    // 3. Return result.
+    return JS::NonnullGCPtr { *result };
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> AesGcm::encrypt(AlgorithmParams const& params, JS::NonnullGCPtr<CryptoKey> key, ByteBuffer const& plaintext)
+{
+    auto const& normalized_algorithm = static_cast<AesGcmParams const&>(params);
+
+    // FIXME: 1. If plaintext has a length greater than 2^39 - 256 bytes, then throw an OperationError.
+
+    // FIXME: 2. If the iv member of normalizedAlgorithm has a length greater than 2^64 - 1 bytes, then throw an OperationError.
+
+    // FIXME: 3. If the additionalData member of normalizedAlgorithm is present and has a length greater than 2^64 - 1 bytes, then throw an OperationError.
+
+    // 4. If the tagLength member of normalizedAlgorithm is not present: Let tagLength be 128.
+    auto tag_length = 0;
+    auto to_compare_against = Vector<int> { 32, 64, 96, 104, 112, 120, 128 };
+    if (!normalized_algorithm.tag_length.has_value())
+        tag_length = 128;
+
+    // If the tagLength member of normalizedAlgorithm is one of 32, 64, 96, 104, 112, 120 or 128: Let tagLength be equal to the tagLength member of normalizedAlgorithm
+    else if (to_compare_against.contains_slow(normalized_algorithm.tag_length.value()))
+        tag_length = normalized_algorithm.tag_length.value();
+
+    // Otherwise: throw an OperationError.
+    else
+        return WebIDL::OperationError::create(m_realm, "Invalid tag length"_string);
+
+    // 5. Let additionalData be the contents of the additionalData member of normalizedAlgorithm if present or the empty octet string otherwise.
+    auto additional_data = normalized_algorithm.additional_data.value_or(ByteBuffer {});
+
+    // 6. Let C and T be the outputs that result from performing the Authenticated Encryption Function described in Section 7.1 of [NIST-SP800-38D] using
+    //    AES as the block cipher,
+    //    the contents of the iv member of normalizedAlgorithm as the IV input parameter,
+    //    the contents of additionalData as the A input parameter,
+    //    tagLength as the t pre-requisite
+    //    and the contents of plaintext as the input plaintext.
+    auto& aes_algorithm = static_cast<AesKeyAlgorithm const&>(*key->algorithm());
+    auto key_length = aes_algorithm.length();
+    auto key_bytes = key->handle().get<ByteBuffer>();
+
+    ::Crypto::Cipher::AESCipher::GCMMode cipher(key_bytes, key_length, ::Crypto::Cipher::Intent::Encryption);
+    ByteBuffer ciphertext = TRY_OR_THROW_OOM(m_realm->vm(), ByteBuffer::create_zeroed(plaintext.size()));
+    ByteBuffer tag = TRY_OR_THROW_OOM(m_realm->vm(), ByteBuffer::create_zeroed(tag_length / 8));
+    [[maybe_unused]] Bytes ciphertext_span = ciphertext.bytes();
+    [[maybe_unused]] Bytes tag_span = tag.bytes();
+
+    // FIXME: cipher.encrypt(plaintext, ciphertext_span, normalized_algorithm.iv, additional_data, tag_span);
+
+    // 7. Let ciphertext be equal to C | T, where '|' denotes concatenation.
+    TRY_OR_THROW_OOM(m_realm->vm(), ciphertext.try_append(tag));
+
+    // 8. Return the result of creating an ArrayBuffer containing ciphertext.
+    return JS::ArrayBuffer::create(m_realm, ciphertext);
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> AesGcm::decrypt(AlgorithmParams const& params, JS::NonnullGCPtr<CryptoKey> key, ByteBuffer const& ciphertext)
+{
+    auto const& normalized_algorithm = static_cast<AesGcmParams const&>(params);
+
+    // 1. If the tagLength member of normalizedAlgorithm is not present: Let tagLength be 128.
+    u32 tag_length = 0;
+    auto to_compare_against = Vector<u32> { 32, 64, 96, 104, 112, 120, 128 };
+    if (!normalized_algorithm.tag_length.has_value())
+        tag_length = 128;
+
+    // If the tagLength member of normalizedAlgorithm is one of 32, 64, 96, 104, 112, 120 or 128: Let tagLength be equal to the tagLength member of normalizedAlgorithm
+    else if (to_compare_against.contains_slow(normalized_algorithm.tag_length.value()))
+        tag_length = normalized_algorithm.tag_length.value();
+
+    // Otherwise: throw an OperationError.
+    else
+        return WebIDL::OperationError::create(m_realm, "Invalid tag length"_string);
+
+    // 2. If ciphertext has a length less than tagLength bits, then throw an OperationError.
+    if (ciphertext.size() < tag_length / 8)
+        return WebIDL::OperationError::create(m_realm, "Invalid ciphertext length"_string);
+
+    // FIXME: 3. If the iv member of normalizedAlgorithm has a length greater than 2^64 - 1 bytes, then throw an OperationError.
+
+    // FIXME: 4. If the additionalData member of normalizedAlgorithm is present and has a length greater than 2^64 - 1 bytes, then throw an OperationError.
+
+    // 5. Let tag be the last tagLength bits of ciphertext.
+    auto tag_bits = tag_length / 8;
+    auto tag = TRY_OR_THROW_OOM(m_realm->vm(), ciphertext.slice(ciphertext.size() - tag_bits, tag_bits));
+
+    // 6. Let actualCiphertext be the result of removing the last tagLength bits from ciphertext.
+    auto actual_ciphertext = TRY_OR_THROW_OOM(m_realm->vm(), ciphertext.slice(0, ciphertext.size() - tag_bits));
+
+    // 7. Let additionalData be the contents of the additionalData member of normalizedAlgorithm if present or the empty octet string otherwise.
+    auto additional_data = normalized_algorithm.additional_data.value_or(ByteBuffer {});
+
+    // 8. Perform the Authenticated Decryption Function described in Section 7.2 of [NIST-SP800-38D] using
+    //    AES as the block cipher,
+    //    the contents of the iv member of normalizedAlgorithm as the IV input parameter,
+    //    the contents of additionalData as the A input parameter,
+    //    tagLength as the t pre-requisite,
+    //    the contents of actualCiphertext as the input ciphertext, C
+    //    and the contents of tag as the authentication tag, T.
+    auto& aes_algorithm = static_cast<AesKeyAlgorithm const&>(*key->algorithm());
+    auto key_length = aes_algorithm.length();
+    auto key_bytes = key->handle().get<ByteBuffer>();
+
+    ::Crypto::Cipher::AESCipher::GCMMode cipher(key_bytes, key_length, ::Crypto::Cipher::Intent::Decryption);
+    ByteBuffer plaintext = TRY_OR_THROW_OOM(m_realm->vm(), ByteBuffer::create_zeroed(actual_ciphertext.size()));
+    [[maybe_unused]] Bytes plaintext_span = plaintext.bytes();
+    [[maybe_unused]] Bytes actual_ciphertext_span = actual_ciphertext.bytes();
+    [[maybe_unused]] Bytes tag_span = tag.bytes();
+
+    // FIXME: auto result = cipher.decrypt(ciphertext, plaintext_span, normalized_algorithm.iv, additional_data, tag_span);
+    auto result = ::Crypto::VerificationConsistency::Inconsistent;
+
+    // If the result of the algorithm is the indication of inauthenticity, "FAIL": throw an OperationError
+    if (result == ::Crypto::VerificationConsistency::Inconsistent)
+        return WebIDL::OperationError::create(m_realm, "Decryption failed"_string);
+
+    // Otherwise: Let plaintext be the output P of the Authenticated Decryption Function.
+
+    // 9. Return the result of creating an ArrayBuffer containing plaintext.
+    return JS::ArrayBuffer::create(m_realm, plaintext);
+}
+
+WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> AesGcm::generate_key(AlgorithmParams const& params, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
+{
+    // 1. If usages contains any entry which is not one of "encrypt", "decrypt", "wrapKey" or "unwrapKey", then throw a SyntaxError.
+    for (auto const& usage : key_usages) {
+        if (usage != Bindings::KeyUsage::Encrypt && usage != Bindings::KeyUsage::Decrypt && usage != Bindings::KeyUsage::Wrapkey && usage != Bindings::KeyUsage::Unwrapkey) {
+            return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+        }
+    }
+
+    // 2. If the length member of normalizedAlgorithm is not equal to one of 128, 192 or 256, then throw an OperationError.
+    auto const& normalized_algorithm = static_cast<AesKeyGenParams const&>(params);
+    auto length = normalized_algorithm.length;
+    if (length != 128 && length != 192 && length != 256) {
+        return WebIDL::OperationError::create(m_realm, MUST(String::formatted("Cannot create AES-CTR key with unusual amount of {} bits", length)));
+    }
+
+    // 3. Generate an AES key of length equal to the length member of normalizedAlgorithm.
+    // 4. If the key generation step fails, then throw an OperationError.
+    auto key_buffer = TRY(generate_aes_key(m_realm->vm(), length / 8));
+
+    // 5. Let key be a new CryptoKey object representing the generated AES key.
+    auto key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { key_buffer });
+
+    // 6. Let algorithm be a new AesKeyAlgorithm.
+    auto algorithm = AesKeyAlgorithm::create(m_realm);
+
+    // 7. Set the name attribute of algorithm to "AES-GCM".
+    algorithm->set_name("AES-GCM"_string);
+
+    // 8. Set the length attribute of algorithm to equal the length member of normalizedAlgorithm.
+    algorithm->set_length(length);
+
+    // 9. Set the [[type]] internal slot of key to "secret".
+    key->set_type(Bindings::KeyType::Secret);
+
+    // 10. Set the [[algorithm]] internal slot of key to algorithm.
+    key->set_algorithm(algorithm);
+
+    // 11. Set the [[extractable]] internal slot of key to be extractable.
+    key->set_extractable(extractable);
+
+    // 12. Set the [[usages]] internal slot of key to be usages.
+    key->set_usages(key_usages);
+
+    // 13. Return key.
+    return { key };
+}
+
 // https://w3c.github.io/webcrypto/#hkdf-operations
 WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> HKDF::import_key(AlgorithmParams const&, Bindings::KeyFormat format, CryptoKey::InternalKeyData key_data, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
 {
@@ -2304,6 +2732,506 @@ WebIDL::ExceptionOr<JS::Value> PBKDF2::get_key_length(AlgorithmParams const&)
 {
     // 1. Return null.
     return JS::js_null();
+}
+
+// https://wicg.github.io/webcrypto-secure-curves/#x25519-operations
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::ArrayBuffer>> X25519::derive_bits(AlgorithmParams const& params, JS::NonnullGCPtr<CryptoKey> key, Optional<u32> length_optional)
+{
+    auto& realm = *m_realm;
+    auto const& normalized_algorithm = static_cast<EcdhKeyDerivePrams const&>(params);
+
+    // 1. If the [[type]] internal slot of key is not "private", then throw an InvalidAccessError.
+    if (key->type() != Bindings::KeyType::Private)
+        return WebIDL::InvalidAccessError::create(realm, "Key is not a private key"_string);
+
+    // 2. Let publicKey be the public member of normalizedAlgorithm.
+    auto& public_key = normalized_algorithm.public_key;
+
+    // 3. If the [[type]] internal slot of publicKey is not "public", then throw an InvalidAccessError.
+    if (public_key->type() != Bindings::KeyType::Public)
+        return WebIDL::InvalidAccessError::create(realm, "Public key is not a public key"_string);
+
+    // 4. If the name attribute of the [[algorithm]] internal slot of publicKey is not equal to
+    //    the name property of the [[algorithm]] internal slot of key, then throw an InvalidAccessError.
+    auto& internal_algorithm = static_cast<KeyAlgorithm const&>(*key->algorithm());
+    auto& public_internal_algorithm = static_cast<KeyAlgorithm const&>(*public_key->algorithm());
+    if (internal_algorithm.name() != public_internal_algorithm.name())
+        return WebIDL::InvalidAccessError::create(realm, "Algorithm mismatch"_string);
+
+    // 5. Let secret be the result of performing the X25519 function specified in [RFC7748] Section 5 with
+    //    key as the X25519 private key k and
+    //    the X25519 public key represented by the [[handle]] internal slot of publicKey as the X25519 public key u.
+    auto private_key = key->handle().get<ByteBuffer>();
+    auto public_key_data = public_key->handle().get<ByteBuffer>();
+
+    ::Crypto::Curves::X25519 curve;
+    auto maybe_secret = curve.compute_coordinate(private_key, public_key_data);
+    if (maybe_secret.is_error())
+        return WebIDL::OperationError::create(realm, "Failed to compute secret"_string);
+
+    auto secret = maybe_secret.release_value();
+
+    // 6. If secret is the all-zero value, then throw a OperationError.
+    //    This check must be performed in constant-time, as per [RFC7748] Section 6.1.
+    // NOTE: The check may be performed by ORing all the bytes together and checking whether the result is zero,
+    //       as this eliminates standard side-channels in software implementations.
+    auto or_bytes = 0;
+    for (auto byte : secret.bytes()) {
+        or_bytes |= byte;
+    }
+
+    if (or_bytes == 0)
+        return WebIDL::OperationError::create(realm, "Secret is the all-zero value"_string);
+
+    // 7. If length is null: Return secret
+    if (!length_optional.has_value()) {
+        auto result = TRY_OR_THROW_OOM(realm.vm(), ByteBuffer::copy(secret));
+        return JS::ArrayBuffer::create(realm, move(result));
+    }
+
+    // Otherwise: If the length of secret in bits is less than length: throw an OperationError.
+    auto length = length_optional.value();
+    if (secret.size() * 8 < length)
+        return WebIDL::OperationError::create(realm, "Secret is too short"_string);
+
+    // Otherwise: Return an octet string containing the first length bits of secret.
+    auto slice = TRY_OR_THROW_OOM(realm.vm(), secret.slice(0, length / 8));
+    auto result = TRY_OR_THROW_OOM(realm.vm(), ByteBuffer::copy(slice));
+    return JS::ArrayBuffer::create(realm, move(result));
+}
+
+WebIDL::ExceptionOr<Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>>> X25519::generate_key([[maybe_unused]] AlgorithmParams const& params, bool extractable, Vector<Bindings::KeyUsage> const& key_usages)
+{
+    // 1. If usages contains an entry which is not "deriveKey" or "deriveBits" then throw a SyntaxError.
+    for (auto const& usage : key_usages) {
+        if (usage != Bindings::KeyUsage::Derivekey && usage != Bindings::KeyUsage::Derivebits) {
+            return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+        }
+    }
+
+    // 2. Generate an X25519 key pair, with the private key being 32 random bytes,
+    //    and the public key being X25519(a, 9), as defined in [RFC7748], section 6.1.
+    ::Crypto::Curves::X25519 curve;
+    auto maybe_private_key = curve.generate_private_key();
+    if (maybe_private_key.is_error())
+        return WebIDL::OperationError::create(m_realm, "Failed to generate private key"_string);
+
+    auto private_key_data = maybe_private_key.release_value();
+
+    auto maybe_public_key = curve.generate_public_key(private_key_data);
+    if (maybe_public_key.is_error())
+        return WebIDL::OperationError::create(m_realm, "Failed to generate public key"_string);
+
+    auto public_key_data = maybe_public_key.release_value();
+
+    // 3. Let algorithm be a new KeyAlgorithm object.
+    auto algorithm = KeyAlgorithm::create(m_realm);
+
+    // 4. Set the name attribute of algorithm to "X25519".
+    algorithm->set_name("X25519"_string);
+
+    // 5. Let publicKey be a new CryptoKey associated with the relevant global object of this [HTML],
+    //    and representing the public key of the generated key pair.
+    auto public_key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { public_key_data });
+
+    // 6. Set the [[type]] internal slot of publicKey to "public"
+    public_key->set_type(Bindings::KeyType::Public);
+
+    // 7. Set the [[algorithm]] internal slot of publicKey to algorithm.
+    public_key->set_algorithm(algorithm);
+
+    // 8. Set the [[extractable]] internal slot of publicKey to true.
+    public_key->set_extractable(true);
+
+    // 9. Set the [[usages]] internal slot of publicKey to be the empty list.
+    public_key->set_usages({});
+
+    // 10. Let privateKey be a new CryptoKey associated with the relevant global object of this [HTML],
+    //     and representing the private key of the generated key pair.
+    auto private_key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { private_key_data });
+
+    // 11. Set the [[type]] internal slot of privateKey to "private"
+    private_key->set_type(Bindings::KeyType::Private);
+
+    // 12. Set the [[algorithm]] internal slot of privateKey to algorithm.
+    private_key->set_algorithm(algorithm);
+
+    // 13. Set the [[extractable]] internal slot of privateKey to extractable.
+    private_key->set_extractable(extractable);
+
+    // 14. Set the [[usages]] internal slot of privateKey to be the usage intersection of usages and [ "deriveKey", "deriveBits" ].
+    private_key->set_usages(usage_intersection(key_usages, { { Bindings::KeyUsage::Derivekey, Bindings::KeyUsage::Derivebits } }));
+
+    // 15. Let result be a new CryptoKeyPair dictionary.
+    // 16. Set the publicKey attribute of result to be publicKey.
+    // 17. Set the privateKey attribute of result to be privateKey.
+    // 18. Return the result of converting result to an ECMAScript Object, as defined by [WebIDL].
+    return Variant<JS::NonnullGCPtr<CryptoKey>, JS::NonnullGCPtr<CryptoKeyPair>> { CryptoKeyPair::create(m_realm, public_key, private_key) };
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<CryptoKey>> X25519::import_key([[maybe_unused]] Web::Crypto::AlgorithmParams const& params, Bindings::KeyFormat key_format, CryptoKey::InternalKeyData key_data, bool extractable, Vector<Bindings::KeyUsage> const& usages)
+{
+    // NOTE: This is a parameter to the function
+    // 1. Let keyData be the key data to be imported.
+
+    auto& vm = m_realm->vm();
+    JS::GCPtr<CryptoKey> key = nullptr;
+
+    // 2. If format is "spki":
+    if (key_format == Bindings::KeyFormat::Spki) {
+        // 1. If usages is not empty then throw a SyntaxError.
+        if (!usages.is_empty())
+            return WebIDL::SyntaxError::create(m_realm, "Usages must be empty"_string);
+
+        // 2. Let spki be the result of running the parse a subjectPublicKeyInfo algorithm over keyData.
+        // 3. If an error occurred while parsing, then throw a DataError.
+        auto spki = TRY(parse_a_subject_public_key_info(m_realm, key_data.get<ByteBuffer>()));
+
+        // 4. If the algorithm object identifier field of the algorithm AlgorithmIdentifier field of spki
+        //    is not equal to the id-X25519 object identifier defined in [RFC8410], then throw a DataError.
+        if (spki.algorithm.identifier != TLS::x25519_oid)
+            return WebIDL::DataError::create(m_realm, "Invalid algorithm"_string);
+
+        // 5. If the parameters field of the algorithm AlgorithmIdentifier field of spki is present, then throw a DataError.
+        if (static_cast<u16>(spki.algorithm.ec_parameters) != 0)
+            return WebIDL::DataError::create(m_realm, "Invalid algorithm parameters"_string);
+
+        // 6. Let publicKey be the X25519 public key identified by the subjectPublicKey field of spki.
+        auto public_key = spki.raw_key;
+
+        // 7. Let key be a new CryptoKey associated with the relevant global object of this [HTML], and that represents publicKey.
+        key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { public_key });
+
+        // 8. Set the [[type]] internal slot of key to "public"
+        key->set_type(Bindings::KeyType::Public);
+
+        // 9. Let algorithm be a new KeyAlgorithm.
+        auto algorithm = KeyAlgorithm::create(m_realm);
+
+        // 10. Set the name attribute of algorithm to "X25519".
+        algorithm->set_name("X25519"_string);
+
+        // 11. Set the [[algorithm]] internal slot of key to algorithm.
+        key->set_algorithm(algorithm);
+    }
+
+    // 2. If format is "pkcs8":
+    else if (key_format == Bindings::KeyFormat::Pkcs8) {
+        // 1. If usages contains an entry which is not "deriveKey" or "deriveBits" then throw a SyntaxError.
+        for (auto const& usage : usages) {
+            if (usage != Bindings::KeyUsage::Derivekey && usage != Bindings::KeyUsage::Derivebits) {
+                return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+            }
+        }
+
+        // 2. Let privateKeyInfo be the result of running the parse a privateKeyInfo algorithm over keyData.
+        // 3. If an error occurred while parsing, then throw a DataError.
+        auto private_key_info = TRY(parse_a_private_key_info(m_realm, key_data.get<ByteBuffer>()));
+
+        // 4. If the algorithm object identifier field of the privateKeyAlgorithm PrivateKeyAlgorithm field of privateKeyInfo
+        //    is not equal to the id-X25519 object identifier defined in [RFC8410], then throw a DataError.
+        if (private_key_info.algorithm.identifier != TLS::x25519_oid)
+            return WebIDL::DataError::create(m_realm, "Invalid algorithm"_string);
+
+        // 5. If the parameters field of the privateKeyAlgorithm PrivateKeyAlgorithmIdentifier field of privateKeyInfo is present, then throw a DataError.
+        if (static_cast<u16>(private_key_info.algorithm.ec_parameters) != 0)
+            return WebIDL::DataError::create(m_realm, "Invalid algorithm parameters"_string);
+
+        // 6. Let curvePrivateKey be the result of performing the parse an ASN.1 structure algorithm,
+        //    with data as the privateKey field of privateKeyInfo,
+        //    structure as the ASN.1 CurvePrivateKey structure specified in Section 7 of [RFC8410], and
+        //    exactData set to true.
+        // 7. If an error occurred while parsing, then throw a DataError.
+        auto curve_private_key = TRY(parse_an_ASN1_structure<StringView>(m_realm, private_key_info.raw_key, true));
+        auto curve_private_key_bytes = TRY_OR_THROW_OOM(vm, ByteBuffer::copy(curve_private_key.bytes()));
+
+        // 8. Let key be a new CryptoKey associated with the relevant global object of this [HTML],
+        //    and that represents the X25519 private key identified by curvePrivateKey.
+        key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { curve_private_key_bytes });
+
+        // 9. Set the [[type]] internal slot of key to "private"
+        key->set_type(Bindings::KeyType::Private);
+
+        // 10. Let algorithm be a new KeyAlgorithm.
+        auto algorithm = KeyAlgorithm::create(m_realm);
+
+        // 11. Set the name attribute of algorithm to "X25519".
+        algorithm->set_name("X25519"_string);
+
+        // 12. Set the [[algorithm]] internal slot of key to algorithm.
+        key->set_algorithm(algorithm);
+    }
+
+    // 2. If format is "jwk":
+    else if (key_format == Bindings::KeyFormat::Jwk) {
+        // 1. If keyData is a JsonWebKey dictionary: Let jwk equal keyData.
+        //    Otherwise: Throw a DataError.
+        if (!key_data.has<Bindings::JsonWebKey>())
+            return WebIDL::DataError::create(m_realm, "keyData is not a JsonWebKey dictionary"_string);
+        auto& jwk = key_data.get<Bindings::JsonWebKey>();
+
+        // 2. If the d field is present and if usages contains an entry which is not "deriveKey" or "deriveBits" then throw a SyntaxError.
+        if (jwk.d.has_value() && !usages.is_empty()) {
+            for (auto const& usage : usages) {
+                if (usage != Bindings::KeyUsage::Derivekey && usage != Bindings::KeyUsage::Derivebits) {
+                    return WebIDL::SyntaxError::create(m_realm, MUST(String::formatted("Invalid key usage '{}'", idl_enum_to_string(usage))));
+                }
+            }
+        }
+
+        // 3. If the d field is not present and if usages is not empty then throw a SyntaxError.
+        if (!jwk.d.has_value() && !usages.is_empty())
+            return WebIDL::SyntaxError::create(m_realm, "Usages must be empty if d is missing"_string);
+
+        // 4. If the kty field of jwk is not "OKP", then throw a DataError.
+        if (jwk.kty != "OKP"sv)
+            return WebIDL::DataError::create(m_realm, "Invalid key type"_string);
+
+        // 5. If the crv field of jwk is not "X25519", then throw a DataError.
+        if (jwk.crv != "X25519"sv)
+            return WebIDL::DataError::create(m_realm, "Invalid curve"_string);
+
+        // 6. If usages is non-empty and the use field of jwk is present and is not equal to "enc" then throw a DataError.
+        if (!usages.is_empty() && jwk.use.has_value() && jwk.use.value() != "enc"sv)
+            return WebIDL::DataError::create(m_realm, "Invalid use"_string);
+
+        // 7. If the key_ops field of jwk is present, and is invalid according to the requirements of JSON Web Key [JWK],
+        //    or it does not contain all of the specified usages values, then throw a DataError.
+        if (jwk.key_ops.has_value()) {
+            for (auto const& usage : usages) {
+                if (!jwk.key_ops->contains_slow(Bindings::idl_enum_to_string(usage)))
+                    return WebIDL::DataError::create(m_realm, MUST(String::formatted("Missing key_ops field: {}", Bindings::idl_enum_to_string(usage))));
+            }
+        }
+
+        // 8. If the ext field of jwk is present and has the value false and extractable is true, then throw a DataError.
+        if (jwk.ext.has_value() && !jwk.ext.value() && extractable)
+            return WebIDL::DataError::create(m_realm, "Invalid extractable"_string);
+
+        // 9. If the d field is present:
+        if (jwk.d.has_value()) {
+            // 1. If jwk does not meet the requirements of the JWK private key format described in Section 2 of [RFC8037], then throw a DataError.
+            // o  The parameter "kty" MUST be "OKP".
+            if (jwk.kty != "OKP"sv)
+                return WebIDL::DataError::create(m_realm, "Invalid key type"_string);
+
+            // // https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
+            // o  The parameter "crv" MUST be present and contain the subtype of the key (from the "JSON Web Elliptic Curve" registry).
+            if (jwk.crv != "X25519"sv)
+                return WebIDL::DataError::create(m_realm, "Invalid curve"_string);
+
+            // o  The parameter "x" MUST be present and contain the public key encoded using the base64url [RFC4648] encoding.
+            if (!jwk.x.has_value())
+                return WebIDL::DataError::create(m_realm, "Missing x field"_string);
+
+            // o  The parameter "d" MUST be present for private keys and contain the private key encoded using the base64url encoding.
+            //    This parameter MUST NOT be present for public keys.
+            if (!jwk.d.has_value())
+                return WebIDL::DataError::create(m_realm, "Missing d field"_string);
+
+            // 2. Let key be a new CryptoKey object that represents the X25519 private key identified by interpreting jwk according to Section 2 of [RFC8037].
+            auto private_key_base_64 = jwk.d.value();
+            auto private_key = TRY_OR_THROW_OOM(vm, decode_base64(private_key_base_64));
+            key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { private_key });
+
+            // 3. Set the [[type]] internal slot of Key to "private".
+            key->set_type(Bindings::KeyType::Private);
+        }
+        // 9. Otherwise:
+        else {
+            // 1. If jwk does not meet the requirements of the JWK public key format described in Section 2 of [RFC8037], then throw a DataError.
+            // o  The parameter "kty" MUST be "OKP".
+            if (jwk.kty != "OKP"sv)
+                return WebIDL::DataError::create(m_realm, "Invalid key type"_string);
+
+            // https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
+            // o  The parameter "crv" MUST be present and contain the subtype of the key (from the "JSON Web Elliptic Curve" registry).
+            if (jwk.crv != "X25519"sv)
+                return WebIDL::DataError::create(m_realm, "Invalid curve"_string);
+
+            // o  The parameter "x" MUST be present and contain the public key encoded using the base64url [RFC4648] encoding.
+            if (!jwk.x.has_value())
+                return WebIDL::DataError::create(m_realm, "Missing x field"_string);
+
+            // o  The parameter "d" MUST be present for private keys and contain the private key encoded using the base64url encoding.
+            //    This parameter MUST NOT be present for public keys.
+            if (jwk.d.has_value())
+                return WebIDL::DataError::create(m_realm, "Present d field"_string);
+
+            // 2. Let key be a new CryptoKey object that represents the X25519 public key identified by interpreting jwk according to Section 2 of [RFC8037].
+            auto public_key_base_64 = jwk.x.value();
+            auto public_key = TRY_OR_THROW_OOM(vm, decode_base64(public_key_base_64));
+            key = CryptoKey::create(m_realm, CryptoKey::InternalKeyData { public_key });
+
+            // 3. Set the [[type]] internal slot of Key to "public".
+            key->set_type(Bindings::KeyType::Public);
+        }
+
+        // 10. Let algorithm be a new instance of a KeyAlgorithm object.
+        auto algorithm = KeyAlgorithm::create(m_realm);
+
+        // 11. Set the name attribute of algorithm to "X25519".
+        algorithm->set_name("X25519"_string);
+
+        // 12. Set the [[algorithm]] internal slot of key to algorithm.
+        key->set_algorithm(algorithm);
+    }
+
+    // 2. If format is "raw":
+    else if (key_format == Bindings::KeyFormat::Raw) {
+        // 1. If usages is not empty then throw a SyntaxError.
+        if (!usages.is_empty())
+            return WebIDL::SyntaxError::create(m_realm, "Usages must be empty"_string);
+
+        // 2. Let algorithm be a new KeyAlgorithm object.
+        auto algorithm = KeyAlgorithm::create(m_realm);
+
+        // 3. Set the name attribute of algorithm to "X25519".
+        algorithm->set_name("X25519"_string);
+
+        // 4. Let key be a new CryptoKey associated with the relevant global object of this [HTML], and representing the key data provided in keyData.
+        key = CryptoKey::create(m_realm, key_data);
+
+        // 5. Set the [[type]] internal slot of key to "public"
+        key->set_type(Bindings::KeyType::Public);
+
+        // 6. Set the [[algorithm]] internal slot of key to algorithm.
+        key->set_algorithm(algorithm);
+    }
+
+    // 2. Otherwise: throw a NotSupportedError.
+    else {
+        return WebIDL::NotSupportedError::create(m_realm, "Invalid key format"_string);
+    }
+
+    // 3. Return key
+    return JS::NonnullGCPtr { *key };
+}
+
+WebIDL::ExceptionOr<JS::NonnullGCPtr<JS::Object>> X25519::export_key(Bindings::KeyFormat format, JS::NonnullGCPtr<CryptoKey> key)
+{
+    auto& vm = m_realm->vm();
+
+    // NOTE: This is a parameter to the function
+    // 1. Let key be the CryptoKey to be exported.
+
+    // 2. If the underlying cryptographic key material represented by the [[handle]] internal slot of key cannot be accessed, then throw an OperationError.
+    // Note: In our impl this is always accessible
+    auto const& handle = key->handle();
+
+    JS::GCPtr<JS::Object> result = nullptr;
+
+    // 3. If format is "spki":
+    if (format == Bindings::KeyFormat::Spki) {
+        // 1. If the [[type]] internal slot of key is not "public", then throw an InvalidAccessError.
+        if (key->type() != Bindings::KeyType::Public)
+            return WebIDL::InvalidAccessError::create(m_realm, "Key is not a public key"_string);
+
+        // 2. Let data be an instance of the subjectPublicKeyInfo ASN.1 structure defined in [RFC5280] with the following properties:
+        //    Set the algorithm field to an AlgorithmIdentifier ASN.1 type with the following properties:
+        //    Set the algorithm object identifier to the id-X25519 OID defined in [RFC8410].
+        //    Set the subjectPublicKey field to keyData.
+        auto public_key = handle.get<ByteBuffer>();
+        auto x25519_oid = Array<int, 7> { 1, 3, 101, 110 };
+        auto data = TRY_OR_THROW_OOM(vm, ::Crypto::PK::wrap_in_subject_public_key_info(public_key, x25519_oid));
+
+        // 3. Let result be a new ArrayBuffer associated with the relevant global object of this [HTML], and containing data.
+        result = JS::ArrayBuffer::create(m_realm, data);
+    }
+
+    // 3. If format is "pkcs8":
+    else if (format == Bindings::KeyFormat::Pkcs8) {
+        // 1. If the [[type]] internal slot of key is not "private", then throw an InvalidAccessError.
+        if (key->type() != Bindings::KeyType::Private)
+            return WebIDL::InvalidAccessError::create(m_realm, "Key is not a private key"_string);
+
+        // 2. Let data be an instance of the privateKeyInfo ASN.1 structure defined in [RFC5208] with the following properties:
+        //    Set the version field to 0.
+        //    Set the privateKeyAlgorithm field to a PrivateKeyAlgorithmIdentifier ASN.1 type with the following properties:
+        //    Set the algorithm object identifier to the id-X25519 OID defined in [RFC8410].
+        //    Set the privateKey field to the result of DER-encoding a CurvePrivateKey ASN.1 type, as defined in Section 7 of [RFC8410],
+        //    that represents the X25519 private key represented by the [[handle]] internal slot of key
+        auto private_key = handle.get<ByteBuffer>();
+        auto x25519_oid = Array<int, 7> { 1, 3, 101, 110 };
+        auto data = TRY_OR_THROW_OOM(vm, ::Crypto::PK::wrap_in_private_key_info(private_key, x25519_oid));
+
+        // 3. Let result be a new ArrayBuffer associated with the relevant global object of this [HTML], and containing data.
+        result = JS::ArrayBuffer::create(m_realm, data);
+    }
+
+    // 3. If format is "jwt":
+    else if (format == Bindings::KeyFormat::Jwk) {
+        // 1. Let jwk be a new JsonWebKey dictionar1y.
+        Bindings::JsonWebKey jwk = {};
+
+        // 2. Set the kty attribute of jwk to "OKP".
+        jwk.kty = "OKP"_string;
+
+        // 3. Set the crv attribute of jwk to "X25519".
+        jwk.crv = "X25519"_string;
+
+        // 4. Set the x attribute of jwk according to the definition in Section 2 of [RFC8037].
+        if (key->type() == Bindings::KeyType::Public) {
+            auto public_key = handle.get<ByteBuffer>();
+            jwk.x = TRY_OR_THROW_OOM(vm, encode_base64url(public_key));
+        } else {
+            // The "x" parameter of the "epk" field is set as follows:
+            // Apply the appropriate ECDH function to the ephemeral private key (as scalar input)
+            // and the standard base point (as u-coordinate input).
+            // The base64url encoding of the output is the value for the "x" parameter of the "epk" field.
+            ::Crypto::Curves::X25519 curve;
+            auto public_key = TRY_OR_THROW_OOM(vm, curve.generate_public_key(handle.get<ByteBuffer>()));
+            jwk.x = TRY_OR_THROW_OOM(vm, encode_base64url(public_key));
+        }
+
+        // 5. If the [[type]] internal slot of key is "private"
+        if (key->type() == Bindings::KeyType::Private) {
+            // 1. Set the d attribute of jwk according to the definition in Section 2 of [RFC8037].
+            auto private_key = handle.get<ByteBuffer>();
+            jwk.d = TRY_OR_THROW_OOM(vm, encode_base64url(private_key));
+        }
+
+        // 6. Set the key_ops attribute of jwk to the usages attribute of key.
+        auto key_ops = Vector<String> {};
+        auto key_usages = verify_cast<JS::Array>(key->usages());
+        for (auto i = 0; i < 10; ++i) {
+            auto usage = key_usages->get(i);
+            if (!usage.has_value())
+                break;
+
+            auto usage_string = TRY(usage.value().to_string(vm));
+            key_ops.append(usage_string);
+        }
+
+        jwk.key_ops = key_ops;
+
+        // 7. Set the ext attribute of jwk to the [[extractable]] internal slot of key.
+        jwk.ext = key->extractable();
+
+        // 8. Let result be the result of converting jwk to an ECMAScript Object, as defined by [WebIDL].
+        result = TRY(jwk.to_object(m_realm));
+    }
+
+    // 3. If format is "raw":
+    else if (format == Bindings::KeyFormat::Raw) {
+        // 1. If the [[type]] internal slot of key is not "public", then throw an InvalidAccessError.
+        if (key->type() != Bindings::KeyType::Public)
+            return WebIDL::InvalidAccessError::create(m_realm, "Key is not a public key"_string);
+
+        // 2. Let data be an octet string representing the X25519 public key represented by the [[handle]] internal slot of key.
+        auto public_key = handle.get<ByteBuffer>();
+
+        // 3. Let result be a new ArrayBuffer associated with the relevant global object of this [HTML], and containing data.
+        result = JS::ArrayBuffer::create(m_realm, public_key);
+    }
+
+    // 3. Otherwise:
+    else {
+        return WebIDL::NotSupportedError::create(m_realm, "Invalid key format"_string);
+    }
+
+    // 4. Return result.
+    return JS::NonnullGCPtr { *result };
 }
 
 }

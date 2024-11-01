@@ -6,6 +6,7 @@
 
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/Segmenter.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/EditingHostManager.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
@@ -14,6 +15,23 @@
 namespace Web::DOM {
 
 JS_DEFINE_ALLOCATOR(EditingHostManager);
+
+JS::NonnullGCPtr<EditingHostManager> EditingHostManager::create(JS::Realm& realm, JS::NonnullGCPtr<Document> document)
+{
+    return realm.heap().allocate<EditingHostManager>(realm, document);
+}
+
+EditingHostManager::EditingHostManager(JS::NonnullGCPtr<Document> document)
+    : m_document(document)
+{
+}
+
+void EditingHostManager::visit_edges(Cell::Visitor& visitor)
+{
+    Base::visit_edges(visitor);
+    visitor.visit(m_document);
+    visitor.visit(m_active_contenteditable_element);
+}
 
 void EditingHostManager::handle_insert(String const& data)
 {
@@ -148,16 +166,6 @@ void EditingHostManager::decrement_cursor_position_offset(CollapseSelection coll
     }
 }
 
-static bool should_continue_beyond_word(Utf8View const& word)
-{
-    for (auto code_point : word) {
-        if (!Unicode::code_point_has_punctuation_general_category(code_point) && !Unicode::code_point_has_separator_general_category(code_point))
-            return false;
-    }
-
-    return true;
-}
-
 void EditingHostManager::increment_cursor_position_to_next_word(CollapseSelection collapse)
 {
     auto selection = m_document->get_selection();
@@ -182,7 +190,7 @@ void EditingHostManager::increment_cursor_position_to_next_word(CollapseSelectio
             } else {
                 MUST(selection->set_base_and_extent(*node, selection->anchor_offset(), *node, *offset));
             }
-            if (should_continue_beyond_word(word))
+            if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;
         }
         break;
@@ -209,7 +217,7 @@ void EditingHostManager::decrement_cursor_position_to_previous_word(CollapseSele
             } else {
                 MUST(selection->set_base_and_extent(*node, selection->anchor_offset(), *node, *offset));
             }
-            if (should_continue_beyond_word(word))
+            if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;
         }
         break;

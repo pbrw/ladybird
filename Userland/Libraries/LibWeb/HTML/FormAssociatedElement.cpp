@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2024, Jelle Raaijmakers <jelle@gmta.nl>
+ * Copyright (c) 2024, Jelle Raaijmakers <jelle@ladybird.org>
  * Copyright (c) 2024, Tim Ledbetter <tim.ledbetter@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -593,6 +593,7 @@ void FormAssociatedTextControlElement::handle_insert(String const& data)
         return;
 
     String data_for_insertion = data;
+    // FIXME: Cut by UTF-16 code units instead of raw bytes
     if (auto max_length = text_node->max_length(); max_length.has_value()) {
         auto remaining_length = *max_length - text_node->data().code_points().length();
         if (remaining_length < data.code_points().length()) {
@@ -623,16 +624,16 @@ void FormAssociatedTextControlElement::handle_delete(DeleteDirection direction)
     if (selection_start == selection_end) {
         if (direction == DeleteDirection::Backward) {
             if (selection_start.value() > 0) {
-                MUST(set_range_text(MUST(String::from_utf8(""sv)), selection_start.value() - 1, selection_end.value(), Bindings::SelectionMode::End));
+                MUST(set_range_text(String {}, selection_start.value() - 1, selection_end.value(), Bindings::SelectionMode::End));
             }
         } else {
             if (selection_start.value() < text_node->data().code_points().length()) {
-                MUST(set_range_text(MUST(String::from_utf8(""sv)), selection_start.value(), selection_end.value() + 1, Bindings::SelectionMode::End));
+                MUST(set_range_text(String {}, selection_start.value(), selection_end.value() + 1, Bindings::SelectionMode::End));
             }
         }
         return;
     }
-    MUST(set_range_text(MUST(String::from_utf8(""sv)), selection_start.value(), selection_end.value(), Bindings::SelectionMode::End));
+    MUST(set_range_text(String {}, selection_start.value(), selection_end.value(), Bindings::SelectionMode::End));
 }
 
 void FormAssociatedTextControlElement::handle_return_key()
@@ -756,16 +757,6 @@ void FormAssociatedTextControlElement::decrement_cursor_position_offset(Collapse
     selection_was_changed();
 }
 
-static bool should_continue_beyond_word(Utf8View const& word)
-{
-    for (auto code_point : word) {
-        if (!Unicode::code_point_has_punctuation_general_category(code_point) && !Unicode::code_point_has_separator_general_category(code_point))
-            return false;
-    }
-
-    return true;
-}
-
 void FormAssociatedTextControlElement::increment_cursor_position_to_next_word(CollapseSelection collapse)
 {
     auto const text_node = form_associated_element_to_text_node();
@@ -780,7 +771,7 @@ void FormAssociatedTextControlElement::increment_cursor_position_to_next_word(Co
             } else {
                 m_selection_end = *offset;
             }
-            if (should_continue_beyond_word(word))
+            if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;
         }
         break;
@@ -803,7 +794,7 @@ void FormAssociatedTextControlElement::decrement_cursor_position_to_previous_wor
             } else {
                 m_selection_end = *offset;
             }
-            if (should_continue_beyond_word(word))
+            if (Unicode::Segmenter::should_continue_beyond_word(word))
                 continue;
         }
         break;

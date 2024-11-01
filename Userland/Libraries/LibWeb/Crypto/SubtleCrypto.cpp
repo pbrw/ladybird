@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021-2022, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2023, stelar7 <dudedbz@gmail.com>
+ * Copyright (c) 2023-2024, stelar7 <dudedbz@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -784,6 +784,14 @@ SupportedAlgorithmsMap supported_algorithms()
     define_an_algorithm<AesCtr, AesDerivedKeyParams>("get key length"_string, "AES-CTR"_string);
     define_an_algorithm<AesCtr, AesKeyGenParams>("generateKey"_string, "AES-CTR"_string);
 
+    // https://w3c.github.io/webcrypto/#aes-gcm-registration
+    define_an_algorithm<AesGcm, AesDerivedKeyParams>("get key length"_string, "AES-GCM"_string);
+    define_an_algorithm<AesGcm>("importKey"_string, "AES-GCM"_string);
+    define_an_algorithm<AesGcm>("exportKey"_string, "AES-GCM"_string);
+    define_an_algorithm<AesGcm, AesKeyGenParams>("generateKey"_string, "AES-GCM"_string);
+    define_an_algorithm<AesGcm, AesGcmParams>("encrypt"_string, "AES-GCM"_string);
+    define_an_algorithm<AesGcm, AesGcmParams>("decrypt"_string, "AES-GCM"_string);
+
     // https://w3c.github.io/webcrypto/#hkdf
     define_an_algorithm<HKDF>("importKey"_string, "HKDF"_string);
     define_an_algorithm<HKDF, HKDFParams>("deriveBits"_string, "HKDF"_string);
@@ -810,6 +818,12 @@ SupportedAlgorithmsMap supported_algorithms()
     define_an_algorithm<ED25519>("sign"_string, "Ed25519"_string);
     define_an_algorithm<ED25519>("verify"_string, "Ed25519"_string);
     define_an_algorithm<ED25519>("generateKey"_string, "Ed25519"_string);
+
+    // https://wicg.github.io/webcrypto-secure-curves/#x25519
+    define_an_algorithm<X25519, EcdhKeyDerivePrams>("deriveBits"_string, "X25519"_string);
+    define_an_algorithm<X25519>("generateKey"_string, "X25519"_string);
+    define_an_algorithm<X25519>("importKey"_string, "X25519"_string);
+    define_an_algorithm<X25519>("exportKey"_string, "X25519"_string);
 
     return internal_object;
 }

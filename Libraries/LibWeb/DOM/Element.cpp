@@ -3212,11 +3212,15 @@ Optional<String> Element::lang() const
         }
 
         //      - If there is no pragma-set default language set, then language information from a higher-level protocol (such as HTTP),
+        if (document().http_content_language().has_value()) {
+            return document().http_content_language();
+        }
+
         //        if any, must be used as the final fallback language instead.
         //      - In the absence of any such language information, and in cases where the higher-level protocol reports multiple languages,
         //        the language of the node is unknown, and the corresponding language tag is the empty string.
         // Default locale sounds like a reasonable fallback here.
-        return {};
+        return {};lang()
     };
 
     // If the resulting value is the empty string, then it must be interpreted as meaning that the language of the node is explicitly unknown.

@@ -339,6 +339,10 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     if (auto maybe_last_modified = navigation_params.response->header_list()->get("Last-Modified"sv.bytes()); maybe_last_modified.has_value())
         document->m_last_modified = Core::DateTime::parse("%a, %d %b %Y %H:%M:%S %Z"sv, maybe_last_modified.value());
 
+    // NOTE: Non-standard: Pull out the Content-Language header to determine the document's language.
+    if (auto maybe_http_content_language = navigation_params.response->header_list()->get("Content-Language"sv.bytes()); maybe_http_content_language.has_value())
+        document->m_http_content_language = MUST(String::from_utf8(maybe_http_content_language.value()));
+
     // 11. Set window's associated Document to document.
     window->set_associated_document(*document);
 
